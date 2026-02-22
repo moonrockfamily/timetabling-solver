@@ -1,0 +1,57 @@
+{
+  "name": "@moonrockfamily/timetabling-solver",
+  "version": "1.0.0",
+  "description": "Time-tabling solver using genetic algorithms and constraint programming",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "clean": "rimraf dist",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "test": "mocha -r ts-node/register test/**/*.spec.ts",
+    "lint": "eslint --ext .ts src test",
+    "prepare": "npm run build",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "genetic-js-no-ww": "github:framp/genetic-js-no-ww",
+    "ics": "^3.8.1",
+    "node-ical": "^0.25.3",
+    "rrule": "^2.7.1"
+  },
+  "devDependencies": {
+    "@types/chai": "^4.3.4",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^18.16.18",
+    "@typescript-eslint/eslint-plugin": "^6.21.0",
+    "@typescript-eslint/parser": "^6.21.0",
+    "chai": "^4.3.7",
+    "eslint": "^8.57.1",
+    "mocha": "^11.2.0",
+    "rimraf": "^5.0.0",
+    "ts-node": "^10.9.1",
+    "typescript": "^4.9.5"
+  },
+  "files": [
+    "dist/**/*"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/moonrockfamily/timetabling-solver.git"
+  },
+  "bugs": {
+    "url": "https://github.com/moonrockfamily/timetabling-solver/issues"
+  },
+  "homepage": "https://github.com/moonrockfamily/timetabling-solver#readme",
+  "keywords": [
+    "timetabling",
+    "scheduling",
+    "genetic algorithm",
+    "availability",
+    "rrule"
+  ],
+  "overrides": {
+    "minimatch": "10.2.1"
+  },
+  "license": "MIT"
+}
