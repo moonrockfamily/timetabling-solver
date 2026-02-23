@@ -310,10 +310,13 @@ function caseZoomPreference() {
   // solver can reason about the type of meeting.  we choose a simple rule
   // where morning hours are considered "zoom" slots and afternoons are
   // "office" ones.
-  let slots = generateSlots(start, end, 60).map(s => ({
-    ...s,
-    activity: s.start.getHours() < 12 ? 'zoom' : 'office',
-  }));
+  // slots are widened with metadata for the example; core type only has
+  // start/end.
+  let slots: (Slot & { activity?: string; location?: string })[] =
+    generateSlots(start, end, 60).map(s => ({
+      ...s,
+      activity: s.start.getHours() < 12 ? 'zoom' : 'office',
+    } as any));
   console.log(`slots range: ${fmtSlot(slots[0])} through ${fmtSlot(slots[slots.length-1])}`);
   console.log(`  (annotated with activity tags, first=${slots[0].activity})`);
 

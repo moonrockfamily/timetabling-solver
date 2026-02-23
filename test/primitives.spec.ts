@@ -40,6 +40,10 @@ import {
   evaluateAvailability,
   intersectAvailability,
   isCompatible,
+  Rule,
+  makeContext,
+  getAccessed,
+  AvailabilityRule,
 } from '../src/index';
 
 describe('timetabling solver (BDD)', () => {
@@ -101,7 +105,8 @@ describe('timetabling solver (BDD)', () => {
     });
 
     it('isFeasible respects activity metadata carried on slot', () => {
-      const mySlots: Slot[] = [{ start: new Date(0), end: new Date(1), activity: 'call' }];
+      // widen slots type to include metadata for test
+      const mySlots: (Slot & { activity?: string })[] = [{ start: new Date(0), end: new Date(1), activity: 'call' }];
       const p: Participant = {
         name: 'X',
         availability: { status: 'available', constraints: [new ActivityConstraint('call')] },
@@ -113,7 +118,7 @@ describe('timetabling solver (BDD)', () => {
     });
 
     it('isFeasible respects location metadata carried on slot', () => {
-      const mySlots: Slot[] = [{ start: new Date(0), end: new Date(1), location: 'office' }];
+      const mySlots: (Slot & { location?: string })[] = [{ start: new Date(0), end: new Date(1), location: 'office' }];
       const p: Participant = {
         name: 'Y',
         availability: { status: 'available', constraints: [new LocationConstraint('office')] },
@@ -170,6 +175,62 @@ describe('timetabling solver (BDD)', () => {
       expect(contexts.every(ctx => !evaluateAvailability(av, ctx))).to.be.true;
     });
 
+    it('Rule class sets optimization hints and is callable via AvailabilityRule', () => {
+      let calls = 0;
+      const rawRuleInstance = new Rule(ctx => {
+        calls++;
+        return ctx.start.getTime() === slots[0].start.getTime() ? 1 : 0;
+      }, { dependsOnSlot: true, dependsOnNow: false });
+      expect(rawRuleInstance.dependsOnSlot).to.be.true;
+      expect(rawRuleInstance.dependsOnNow).to.be.false;
+      // treat as AvailabilityRule for calling
+      const r: AvailabilityRule = rawRuleInstance as unknown as AvailabilityRule;
+        expect(r({ start: slots[0].start, end: slots[0].end })).to.equal(1);
+      expect(r({ start: slots[1].start, end: slots[1].end })).to.equal(0);
+      // constructor inference invokes the provided function once, so we expect
+      // three total calls (one for dependency detection + two explicit calls).
+      expect(calls).to.equal(3);
+    });
+
+    it('dependency inference detects slot/now usage automatically', () => {
+      const r1 = new Rule(ctx => 0.5);               // no references
+      expect(r1.dependsOnSlot).to.be.false;
+      expect(r1.dependsOnNow).to.be.false;
+      const r2 = new Rule(ctx => ctx.start.getTime());
+      expect(r2.dependsOnSlot).to.be.true;
+      expect(r2.dependsOnNow).to.be.false;
+      const r3 = new Rule(ctx => (ctx.now ? 1 : 0));
+      expect(r3.dependsOnSlot).to.be.false;
+      expect(r3.dependsOnNow).to.be.true;
+      const r4 = new Rule(ctx => (ctx.start, ctx.now ? 0 : 1));
+      expect(r4.dependsOnSlot).to.be.true;
+      expect(r4.dependsOnNow).to.be.true;
+    });
+
+    it('scheduler annotates raw function rules with inferred hints', () => {
+      const raw: AvailabilityRule = (ctx: EvaluationContext) => (ctx.start.getTime() > 0 ? 1 : 0);
+      const p: Participant = { name: 'Raw', rules: [raw] };
+      // trigger evaluation path
+      isFeasible({ start: new Date(0), end: new Date(1) }, p);
+      expect(raw.dependsOnSlot).to.be.true;
+      expect(raw.dependsOnNow).to.be.false;
+    });
+
+    it('makeContext tracks accesses on a context object', () => {
+      const ctx = makeContext({
+        start: new Date(1),
+        end: new Date(2),
+        activity: 'x',
+        now: new Date(3),
+      });
+      // read some props
+      void ctx.start;
+      void ctx.activity;
+      expect(getAccessed(ctx).has('start')).to.be.true;
+      expect(getAccessed(ctx).has('activity')).to.be.true;
+      expect(getAccessed(ctx).has('now')).to.be.false;
+    });
+
     it('Intersection returns unavailable when one side is unavailable', () => {
       const a: Availability = { status: 'available', constraints: [] };
       const b: Availability = { status: 'unavailable', constraints: [] };
@@ -181,7 +242,7 @@ describe('timetabling solver (BDD)', () => {
   // preference and fitness tests
   describe('Preference & fitness behaviors', () => {
     it('preferenceScore can inspect slot metadata and now', () => {
-      const slot: Slot = { start: new Date(0), end: new Date(1), activity: 'call', location: 'office' };
+      const slot: (Slot & { activity?: string; location?: string }) = { start: new Date(0), end: new Date(1), activity: 'call', location: 'office' };
       const ctx = {...slot, now: new Date(0)};
       const p: Participant = {
         name: 'Meta',
@@ -192,8 +253,8 @@ describe('timetabling solver (BDD)', () => {
 
     it('multi-slot fitness passes context for each slot', () => {
       const slots: Slot[] = [
-        { start: new Date(0), end: new Date(1), activity: 'a' },
-        { start: new Date(1), end: new Date(2), activity: 'b' },
+        { start: new Date(0), end: new Date(1), activity: 'a' } as Slot & { activity?: string },
+        { start: new Date(1), end: new Date(2), activity: 'b' } as Slot & { activity?: string },
       ];
       const p: Participant = { name: 'X', preference: c => (c.activity === 'a' ? 0.2 : 0.8) };
       const genome: Chromosome = { slotIndex: 0, durationSlots: 2 };
@@ -237,12 +298,19 @@ describe('timetabling solver (BDD)', () => {
     it('rules allow multiple alternative availability predicates', () => {
       // participant can join via phone any time (no notice) or in-person after 10am
       const twoSlots = generateSlots(new Date('2026-02-24T09:00:00'), new Date('2026-02-24T12:00:00'), 60);
+      const rulePhone = new Rule(ctx => (ctx.activity === 'phone' ? 1 : 0), {
+        dependsOnSlot: true,
+        dependsOnNow: false,
+      });
+      const ruleOffice = new Rule(ctx => {
+        const t = ctx.start.getTime();
+        const start = new Date('2026-02-24T10:00:00').getTime();
+        const end = new Date('2026-02-24T15:00:00').getTime();
+        return ctx.location === 'office' && t >= start && t <= end ? 1 : 0;
+      });
       const p: Participant = {
         name: 'Bob',
-        rules: [
-          { constraints: [new ActivityConstraint('phone')] },
-          { constraints: [new LocationConstraint('office'), new TimeConstraint(new Date('2026-02-24T10:00:00'), new Date('2026-02-24T15:00:00'))], noticeMs: 0 },
-        ],
+        rules: [rulePhone as unknown as AvailabilityRule, ruleOffice as unknown as AvailabilityRule],
       };
       // first slot is 9am, not office but phone missing -> not feasible
       expect(isFeasible(twoSlots[0], p)).to.be.false;

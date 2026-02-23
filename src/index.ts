@@ -16,6 +16,7 @@ export { runMetaGA, ParamSpec, ParamSet, MetaOptions, MetaResult };
 
 // core domain modules
 export * from './constraints';
+export * from './rules';
 export * from './scheduler';
 export * from './tuning';
 export * from './ics';

@@ -4,10 +4,15 @@ import {
   Constraint,
   Slot,
   evaluateAvailability,
-  evaluateRule,
-  AvailabilityRule,
   EvaluationContext,
 } from './constraints';
+import {
+  evaluateRule,
+  AvailabilityRule,
+  makeContext,
+  TrackedEvaluationContext,
+  inferRuleDependencies,
+} from './rules';
 
 // --- utilities -----------------------------------------------------------
 export interface Participant {
@@ -61,33 +66,65 @@ export interface MultiChromosome {
 // helpers for availability rules ------------------------------------------------
 
 /**
- * Convert a participant's legacy availability/rrule/notice fields into a
- * single rule.  Returns `undefined` if the participant has no legacy data.
+ * Convert a participant's legacy availability/rrule/notice/hardAvailability
+ * fields into a single `AvailabilityRule` function.  Returns `undefined` if
+ * the participant had no legacy data at all.
  */
 function legacyRuleFromParticipant(p: Participant): AvailabilityRule | undefined {
-  if (!p.availability && !p.rruleSet && p.noticeRequired === undefined) return undefined;
-  const r: AvailabilityRule = {};
-  if (p.availability) {
-    r.status = p.availability.status;
-    r.constraints = p.availability.constraints as Constraint[];
+  if (!p.availability && !p.rruleSet && p.noticeRequired === undefined && !p.hardAvailability) {
+    return undefined;
   }
-  if (p.rruleSet) {
-    r.rruleSet = p.rruleSet;
-  }
-  if (p.noticeRequired !== undefined) {
-    r.noticeMs = p.noticeRequired;
-  }
-  return r;
+
+  const rule: AvailabilityRule = ctx => {
+    // enforce high‑level availability object
+    if (p.availability) {
+      if (p.availability.status === 'unavailable') return 0;
+      for (const c of p.availability.constraints) {
+        if (!c.satisfies(ctx)) return 0;
+      }
+    }
+    // recurrence set
+    if (p.rruleSet) {
+      const hits = p.rruleSet.between(ctx.start, ctx.end, true);
+      if (hits.length === 0) return 0;
+    }
+    // notice requirement
+    if (p.noticeRequired !== undefined) {
+      const now = ctx.now ?? new Date();
+      if (ctx.start.getTime() - now.getTime() < p.noticeRequired) return 0;
+    }
+    // hard availability predicate (slot-only)
+    if (p.hardAvailability) {
+      if (!p.hardAvailability({ start: ctx.start, end: ctx.end } as Slot)) return 0;
+    }
+    return 1;
+  };
+  return rule;
 }
 
 /**
  * Return the set of availability rules that apply to a participant, defaulting
  * to legacy fields when `rules` is not provided.
  */
+function attachDeps(rule: AvailabilityRule): AvailabilityRule {
+  if (rule.dependsOnSlot !== undefined || rule.dependsOnNow !== undefined) {
+    return rule;
+  }
+  const { usesSlot, usesNow } = inferRuleDependencies(rule);
+  rule.dependsOnSlot = usesSlot;
+  rule.dependsOnNow = usesNow;
+  return rule;
+}
+
 function participantRules(p: Participant): AvailabilityRule[] {
-  if (p.rules && p.rules.length) return p.rules;
-  const r = legacyRuleFromParticipant(p);
-  return r ? [r] : [];
+  let rules: AvailabilityRule[] = [];
+  if (p.rules && p.rules.length) {
+    rules = p.rules.map(r => attachDeps(r));
+  } else {
+    const r = legacyRuleFromParticipant(p);
+    if (r) rules = [r];
+  }
+  return rules.map(attachDeps);
 }
 
 /**
@@ -255,21 +292,9 @@ export function getFeasibilityDetail(
     };
     const rules = participantRules(participant);
     if (rules.length > 0) {
-      let matched = false;
-      let hadPreferred = false;
-      for (const r of rules) {
-        const ok = evaluateRule(r, ctx);
-        if (ok) {
-          matched = true;
-          if (r.status === 'preferred') hadPreferred = true;
-          break; // one rule is enough
-        }
-      }
+      const matched = rules.some(r => evaluateRule(r, ctx));
       if (!matched) {
         add('availability constraint');
-      } else if (hadPreferred) {
-        // annotate but not considered a failure; preference bonus applied
-        // during scoring instead
       }
     }
     // still enforce hardAvailability predicate and bookedSlots/
@@ -303,42 +328,41 @@ export function isFeasible(slot: Slot | Slot[], participant: Participant): boole
  * @returns score in the range 0..1
  */
 export function preferenceScore(ctx: EvaluationContext, participant: Participant): number {
-  let base = 1;
+  // preferenceScore is intended to measure a participant's *desire* for a slot,
+  // not their basic availability.  Legacy availability rules (created when a
+  // participant uses the old `availability` field instead of `rules`) always
+  // return `1` for feasible slots and therefore would swamp any explicit
+  // preferences.  To keep behaviour intuitive we only consider user-supplied
+  // `rules` here; availability still influences feasibility via
+  // `isFeasible`.
+  const scores: number[] = [];
 
-  // determine which rules (if any) apply to this context
-  const appliedRules = participantRules(participant).filter(r => evaluateRule(r, ctx));
-
-  if (appliedRules.length > 0) {
-    // if any rule defines a preference, use the highest of those values;
-    // otherwise fall back to the participant-level callback
-    const rulePrefs: number[] = [];
-    let hadPreferredStatus = false;
-    for (const r of appliedRules) {
-      if (r.preference) {
-        rulePrefs.push(Math.max(0, Math.min(1, r.preference(ctx))));
-      }
-      if (r.status === 'preferred') hadPreferredStatus = true;
-    }
-    if (rulePrefs.length > 0) {
-      base = Math.max(...rulePrefs);
-    } else if (participant.preference) {
-      base = Math.max(0, Math.min(1, participant.preference(ctx)));
-    }
-    if (hadPreferredStatus) {
-      base = Math.min(1, base + 0.1);
-    }
-  } else {
-    // no rule matched; fall back to participant-level callback and legacy
-    // availability status
-    if (participant.preference) {
-      base = Math.max(0, Math.min(1, participant.preference(ctx)));
-    }
-    if (participant.availability?.status === 'preferred') {
-      base = Math.min(1, base + 0.1);
+  if (participant.rules && participant.rules.length) {
+    const rules = participantRules(participant);
+    for (const r of rules) {
+      const v = Math.max(0, Math.min(1, (r as any)(ctx)));
+      scores.push(v);
     }
   }
 
-  return base;
+  if (participant.preference) {
+    scores.push(Math.max(0, Math.min(1, participant.preference(ctx))));
+  }
+
+  if (scores.length === 0) {
+    // no explicit preference at all; neutral baseline
+    scores.push(1);
+  }
+
+  let result = Math.max(...scores);
+
+  // apply a small bump for participants explicitly marked as "preferred".  This
+  // mirrors earlier behaviour where status influenced preference as well as
+  // feasibility.  The bonus is clamped so the return value stays within [0,1].
+  if (participant.availability?.status === 'preferred') {
+    result = Math.min(1, result + 0.1);
+  }
+  return result;
 }
 
 // --- GA-specific glue ----------------------------------------------------
@@ -704,11 +728,16 @@ export function fitness(
       return 0;
     }
     const scores = range.map(s => {
-      const ctx: EvaluationContext = {
-        ...s,
+      const ctx: TrackedEvaluationContext = makeContext({
+        start: s.start,
+        end: s.end,
+        activity: (s as any).activity,
+        location: (s as any).location,
         now: new Date(),
-      };
-      return preferenceScore(ctx, p);
+      });
+      const val = preferenceScore(ctx, p);
+      // optional: cache dependency information from ctx.accessed here
+      return val;
     });
     prefs.push(scores.reduce((a,b)=>a+b,0)/scores.length);
   }

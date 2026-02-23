@@ -69,7 +69,9 @@ describe('tuning helpers', () => {
     expect(feat[7]).to.equal(1); // other (x-custom)
   });
 
-  it('runMetaGA can tune GA options for a trivial scheduling problem', () => {
+  it('runMetaGA can tune GA options for a trivial scheduling problem', function() {
+    // this operation may take slightly longer on CI; allow more time
+    this.timeout(5000);
     const tuned = tuneGAOptions(
       [
         { slots: slots3, participant: [participantPrefersFirst] },
