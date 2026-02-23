@@ -15,7 +15,7 @@ describe('real estate showing scheduling', () => {
     });
     it('GA picks slot when all parties available', () => {
         const buyer = { name: 'Buyer' }; // fully available
-        const agent = { name: 'Agent', preference: slot => (slot.start.getHours() < 12 ? 1 : 0.5) };
+        const agent = { name: 'Agent', preference: ctx => (ctx.start.getHours() < 12 ? 1 : 0.5) };
         const homeowner = { name: 'Homeowner', availability: { status: 'available', constraints: [] } };
         const r = (0, index_1.runGenetic)(showSlots, [buyer, agent, homeowner], { size: 20, iterations: 30 });
         (0, chai_1.expect)(r, 'should find at least one slot when all available').to.not.be.null;
@@ -44,9 +44,9 @@ describe('real estate showing scheduling', () => {
         (0, chai_1.expect)((0, index_1.evaluateAvailability)(homeowner.availability, badCtx), 'wrong activity should not satisfy').to.be.false;
     });
     it('Multiple buyers compete and agent preference resolves tie', () => {
-        const buyer1 = { name: 'Buyer1', preference: slot => slot.start.getHours() < 12 ? 0.2 : 0.8 };
-        const buyer2 = { name: 'Buyer2', preference: slot => slot.start.getHours() < 12 ? 0.8 : 0.2 };
-        const agent = { name: 'Agent', preference: slot => 1 - Math.abs(slot.start.getHours() - 10) / 10 };
+        const buyer1 = { name: 'Buyer1', preference: ctx => ctx.start.getHours() < 12 ? 0.2 : 0.8 };
+        const buyer2 = { name: 'Buyer2', preference: ctx => ctx.start.getHours() < 12 ? 0.8 : 0.2 };
+        const agent = { name: 'Agent', preference: ctx => 1 - Math.abs(ctx.start.getHours() - 10) / 10 };
         const homeowner = { name: 'Homeowner', availability: { status: 'available', constraints: [] } };
         const r = (0, index_1.runGenetic)(showSlots, [buyer1, buyer2, agent, homeowner], { size: 30, iterations: 50 });
         (0, chai_1.expect)(r, 'should find a slot even with competing buyers').to.not.be.null;
@@ -95,7 +95,7 @@ describe('real estate showing scheduling', () => {
     it('Agent weighted preference steers choice when buyers indifferent', () => {
         const buyer1 = { name: 'B1' };
         const buyer2 = { name: 'B2' };
-        const agent = { name: 'Agent', preference: slot => slot.start.getHours() === 10 ? 1 : 0.1 };
+        const agent = { name: 'Agent', preference: ctx => ctx.start.getHours() === 10 ? 1 : 0.1 };
         const homeowner = { name: 'Homeowner', availability: { status: 'available', constraints: [] } };
         const r = (0, index_1.runGenetic)(showSlots, [buyer1, buyer2, agent, homeowner], { size: 20, iterations: 20 });
         (0, chai_1.expect)(r, 'agent prefers 10am slots, result should be close').to.not.be.null;
@@ -130,7 +130,7 @@ describe('real estate showing scheduling', () => {
     });
     it('Booked slots plus agent preference leads to later slot choice', () => {
         const buyer = { name: 'Buyer', bookedSlots: [showSlots[0]] };
-        const agent = { name: 'Agent', preference: slot => slot.start.getHours() > 12 ? 1 : 0.1 };
+        const agent = { name: 'Agent', preference: ctx => ctx.start.getHours() > 12 ? 1 : 0.1 };
         const homeowner = { name: 'Homeowner', availability: { status: 'available', constraints: [] } };
         const r = (0, index_1.runGenetic)(showSlots, [buyer, agent, homeowner], { size: 20, iterations: 20 });
         (0, chai_1.expect)(r, 'should choose an afternoon slot due to preference').to.not.be.null;
@@ -140,7 +140,7 @@ describe('real estate showing scheduling', () => {
     it('Two buyers both have bookings that overlap with high-preference slots', () => {
         const buyer1 = { name: 'B1', bookedSlots: [showSlots[2]] };
         const buyer2 = { name: 'B2', bookedSlots: [showSlots[3]] };
-        const agent = { name: 'Agent', preference: slot => slot.start.getHours() === 10 ? 1 : 0 };
+        const agent = { name: 'Agent', preference: ctx => ctx.start.getHours() === 10 ? 1 : 0 };
         const homeowner = { name: 'Homeowner', availability: { status: 'available', constraints: [] } };
         const r = (0, index_1.runGenetic)(showSlots, [buyer1, buyer2, agent, homeowner], { size: 20, iterations: 20 });
         // best slots 2 and 3 blocked, expect selection not 2 or 3
@@ -170,13 +170,31 @@ describe('real estate showing scheduling', () => {
         }
     });
     // helper function tests and business-rule scenario
-    it('assembleGroups helper builds combined participant lists', () => {
+    it('assembleGroups helper builds combined participant lists with two common members', () => {
         const b1 = { name: 'B1' };
         const b2 = { name: 'B2' };
         const agent = { name: 'A' };
         const homeowner = { name: 'H' };
-        const groups = (0, index_1.assembleGroups)([[b1], [b2]], agent, homeowner);
+        const baseGroups = [[b1], [b2]];
+        const groups = (0, index_1.assembleGroups)(baseGroups, agent, homeowner);
         (0, chai_1.expect)(groups).to.deep.equal([[b1, agent, homeowner], [b2, agent, homeowner]]);
+    });
+
+    it('assembleGroups works with zero common members (identity)', () => {
+        const g1 = { name: 'X' };
+        const g2 = { name: 'Y' };
+        const baseGroups = [[g1], [g2]];
+        const groups = (0, index_1.assembleGroups)(baseGroups);
+        (0, chai_1.expect)(groups).to.deep.equal([[g1], [g2]]);
+    });
+
+    it('assembleGroups can append any number of common members', () => {
+        const p = { name: 'P' };
+        const q = { name: 'Q' };
+        const r = { name: 'R' };
+        const baseGroups = [[p]];
+        const result = (0, index_1.assembleGroups)(baseGroups, q, r);
+        (0, chai_1.expect)(result).to.deep.equal([[p, q, r]]);
     });
     it('Business rule: agent prefers afternoon while buyers want mornings', () => {
         const buyers = [
@@ -202,9 +220,9 @@ describe('real estate showing scheduling', () => {
         const agentObj = { name: 'Agent' };
         const homeownerObj = { name: 'Homeowner', availability: { status: 'available', constraints: [] } };
         const meetings = [
-            { slots: showSlots, people: [{ name: 'Buyer1' }, agentObj, homeownerObj] },
-            { slots: showSlots, people: [{ name: 'Buyer2' }, agentObj, homeownerObj] },
-            { slots: showSlots, people: [{ name: 'Buyer3' }, agentObj, homeownerObj] },
+            { slots: showSlots, participant: [{ name: 'Buyer1' }, agentObj, homeownerObj] },
+            { slots: showSlots, participant: [{ name: 'Buyer2' }, agentObj, homeownerObj] },
+            { slots: showSlots, participant: [{ name: 'Buyer3' }, agentObj, homeownerObj] },
         ];
         // cast to any to bypass strict Meeting typings; the runtime structure is correct
         const results = (0, index_1.runBatch)(meetings, { size: 20, iterations: 20 });

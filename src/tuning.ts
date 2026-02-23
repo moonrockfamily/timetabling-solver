@@ -1,5 +1,5 @@
 import { runMetaGA, ParamSpec, ParamSet, MetaOptions, MetaResult } from './metaOptimizer';
-import { runGenetic, fitness, estimateOptions, GARunOptions, Slot, Person } from './index';
+import { runGenetic, fitness, estimateOptions, GARunOptions, Slot, Participant } from './index';
 
 // --- adaptive/bulk tuning helpers ------------------------------------------------
 
@@ -10,7 +10,7 @@ import { runGenetic, fitness, estimateOptions, GARunOptions, Slot, Person } from
  * evaluate them.
  */
 export function tuneGAOptions(
-  trainingProblems: { slots: Slot[]; people: Person[] }[],
+  trainingProblems: { slots: Slot[]; participant: Participant[] }[],
   ranges: {
     size?: [number, number];
     iterations?: [number, number];
@@ -36,9 +36,9 @@ export function tuneGAOptions(
     };
     let total = 0;
     for (const prob of trainingProblems) {
-      const best = runGenetic(prob.slots, prob.people, opts);
+      const best = runGenetic(prob.slots, prob.participant, opts);
       if (best) {
-        total += fitness(best, prob.slots, prob.people);
+        total += fitness(best, prob.slots, prob.participant);
       }
     }
     return total / trainingProblems.length;
@@ -62,12 +62,12 @@ export function tuneGAOptions(
  */
 export function adaptGAOptions(
   slots: Slot[],
-  people: Person[],
+  participant: Participant[],
   baseOptions: GARunOptions = {},
   trials = 5,
   radius = 0.3
 ): GARunOptions {
-  const base = { ...estimateOptions(slots, [{ people }]), ...baseOptions };
+  const base = { ...estimateOptions(slots, [{ participant }]), ...baseOptions };
 
   function perturb(value: number, min: number, max: number): number {
     const span = max - min;
@@ -90,8 +90,8 @@ export function adaptGAOptions(
       iterations: perturb(base.iterations ?? minMax.iterations[0], minMax.iterations[0], minMax.iterations[1]),
       restarts: perturb(base.restarts ?? minMax.restarts[0], minMax.restarts[0], minMax.restarts[1]),
     };
-    const sol = runGenetic(slots, people, candidate);
-    const score = sol ? fitness(sol, slots, people) : 0;
+    const sol = runGenetic(slots, participant, candidate);
+    const score = sol ? fitness(sol, slots, participant) : 0;
     if (score > bestScore) {
       bestScore = score;
       best = candidate;
@@ -104,17 +104,17 @@ export function adaptGAOptions(
 // --- feature extraction + modelling ---------------------------------------
 
 export type FeatureExtractor = (
-  problem: { slots: Slot[]; people: Person[] }
+  problem: { slots: Slot[]; participant: Participant[] }
 ) => number[];
 
 export const defaultFeatureExtractor: FeatureExtractor = problem => {
   const slotCount = problem.slots.length;
-  const peopleCount = problem.people.length;
+  const participantCount = problem.participant.length;
 
   // count constraints by kind so the model can distinguish, for example, a lot
   // of `NoticeConstraint` entries from a lot of `LocationConstraint` ones.
   const constraintCounts: Record<string, number> = {};
-  for (const p of problem.people) {
+  for (const p of problem.participant) {
     const list = p.availability?.constraints ?? [];
     for (const c of list) {
       constraintCounts[c.kind] = (constraintCounts[c.kind] || 0) + 1;
@@ -137,26 +137,26 @@ export const defaultFeatureExtractor: FeatureExtractor = problem => {
     )
     .reduce((acc, [,v]) => acc + v, 0);
 
-  const bookedCount = problem.people.reduce(
+  const bookedCount = problem.participant.reduce(
     (acc, p) => acc + (p.bookedSlots?.length ?? 0),
     0
   );
-  const prefCount = problem.people.reduce(
+  const prefCount = problem.participant.reduce(
     (acc, p) => acc + (p.preference ? 1 : 0),
     0
   );
-  const hardCount = problem.people.reduce(
+  const hardCount = problem.participant.reduce(
     (acc, p) => acc + (p.hardAvailability ? 1 : 0),
     0
   );
-  const noticeCount = problem.people.reduce(
+  const noticeCount = problem.participant.reduce(
     (acc, p) => acc + (p.noticeRequired ? 1 : 0),
     0
   );
 
   return [
     slotCount,
-    peopleCount,
+    participantCount,
     timeConstraints,
     noticeConstraints,
     activityConstraints,
@@ -181,7 +181,7 @@ export interface TuningModel {
 }
 
 export function buildTuningModel(
-  problems: { slots: Slot[]; people: Person[] }[],
+  problems: { slots: Slot[]; participant: Participant[] }[],
   featureExtractor: FeatureExtractor = defaultFeatureExtractor,
   metaOpts: MetaOptions = {}
 ): TuningModel {

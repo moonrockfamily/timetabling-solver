@@ -16,22 +16,22 @@ const slots3 = [
   { start: new Date(1), end: new Date(2) },
   { start: new Date(2), end: new Date(3) },
 ];
-const personPrefersFirst: any = { name: 'P', preference: (s: any) => (s.start.getTime() === 0 ? 1 : 0) };
+const participantPrefersFirst: any = { name: 'P', preference: (s: any) => (s.start.getTime() === 0 ? 1 : 0) };
 
 describe('tuning helpers', () => {
-  it('defaultFeatureExtractor counts slots, people, constraint types and bookings', () => {
+  it('defaultFeatureExtractor counts slots, participant, constraint types and bookings', () => {
     const slots = [{ start: new Date(0), end: new Date(1) }];
-    const person: any = {
+    const participant: any = {
       name: 'C',
       availability: { status: 'available', constraints: [{ kind: 'time', satisfies: () => true }] },
       bookedSlots: [{ start: new Date(5), end: new Date(6) }],
     };
-    const feat = defaultFeatureExtractor({ slots, people: [person] });
-    // slot count, people count, then five specific constraint kinds,
+    const feat = defaultFeatureExtractor({ slots, participant: [participant] });
+    // slot count, participant count, then five specific constraint kinds,
     // a catch-all "other" count, then booked/pref/hard/notice counts
     expect(feat).to.have.length(12);
     expect(feat[0]).to.equal(1); // slots
-    expect(feat[1]).to.equal(1); // people
+    expect(feat[1]).to.equal(1); // participant
     expect(feat[2]).to.equal(1); // time constraints
     expect(feat[3]).to.equal(0); // notice constraints
     expect(feat[4]).to.equal(0); // activity
@@ -46,7 +46,7 @@ describe('tuning helpers', () => {
 
   it('recognizes multiple constraint kinds in feature vector', () => {
     const slots = [{ start: new Date(0), end: new Date(1) }];
-    const person: any = {
+    const participant: any = {
       name: 'C',
       availability: {
         status: 'available',
@@ -60,7 +60,7 @@ describe('tuning helpers', () => {
         ],
       },
     };
-    const feat = defaultFeatureExtractor({ slots, people: [person] });
+    const feat = defaultFeatureExtractor({ slots, participant: [participant] });
     expect(feat[2]).to.equal(1); // time
     expect(feat[3]).to.equal(1); // notice
     expect(feat[4]).to.equal(1); // activity
@@ -72,8 +72,8 @@ describe('tuning helpers', () => {
   it('runMetaGA can tune GA options for a trivial scheduling problem', () => {
     const tuned = tuneGAOptions(
       [
-        { slots: slots3, people: [personPrefersFirst] },
-        { slots: slots3, people: [personPrefersFirst] },
+        { slots: slots3, participant: [participantPrefersFirst] },
+        { slots: slots3, participant: [participantPrefersFirst] },
       ],
       { size: [5, 50], iterations: [5, 100], restarts: [1, 5] },
       { populationSize: 10, iterations: 20 }
@@ -86,19 +86,21 @@ describe('tuning helpers', () => {
 
   it('adaptGAOptions tweaks a base configuration for a single problem', () => {
     const base: GARunOptions = { size: 10, iterations: 10, restarts: 1 };
-    const adapted = adaptGAOptions(slots3, [personPrefersFirst], base, 10, 0.5);
+    const adapted = adaptGAOptions(slots3, [participantPrefersFirst], base, 10, 0.5);
     expect(adapted.size).to.be.within(10, 500);
     expect(adapted.iterations).to.be.within(1, 2000);
     expect(adapted.restarts).to.be.within(1, 20);
   });
 
-  it('buildTuningModel returns a simple nearest-neighbour predictor', () => {
+  it('buildTuningModel returns a simple nearest-neighbour predictor', function() {
+    // the model construction can be slightly slow in CI; allow more time
+    this.timeout(5000);
     const slots1 = [{ start: new Date(0), end: new Date(1) }];
     const slots2 = [{ start: new Date(0), end: new Date(1) }, { start: new Date(1), end: new Date(2) }];
-    const person: any = { name: 'X', preference: () => 1 };
+    const participant: any = { name: 'X', preference: () => 1 };
     const problems = [
-      { slots: slots1, people: [person] },
-      { slots: slots2, people: [person] },
+      { slots: slots1, participant: [participant] },
+      { slots: slots2, participant: [participant] },
     ];
 
     // build model from training problems

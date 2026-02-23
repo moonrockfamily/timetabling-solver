@@ -49,7 +49,7 @@ describe('timetabling solver (BDD)', () => {
                 constraints: [timeC, actC],
             };
             const meetingCtx = {
-                slot: slots[1],
+                ...slots[1],
                 activity: 'meeting',
             };
             (0, chai_1.expect)((0, index_1.evaluateAvailability)(withActivity, meetingCtx)).to.be.true;
@@ -59,14 +59,14 @@ describe('timetabling solver (BDD)', () => {
             const now = new Date();
             now.setTime(slot.start.getTime() - 1000);
             const notice = new index_1.NoticeConstraint(500);
-            (0, chai_1.expect)(notice.satisfies({ slot, now })).to.be.true;
-            (0, chai_1.expect)(notice.satisfies({ slot, now: new Date(slot.start.getTime() - 100) })).to.be.false;
+            (0, chai_1.expect)(notice.satisfies({ ...slot, now })).to.be.true;
+            (0, chai_1.expect)(notice.satisfies({ ...slot, now: new Date(slot.start.getTime() - 100) })).to.be.false;
         });
         it('Location constraint matches exact location', () => {
             const slot = slots[0];
             const loc = new index_1.LocationConstraint('office');
-            (0, chai_1.expect)(loc.satisfies({ slot, location: 'office' })).to.be.true;
-            (0, chai_1.expect)(loc.satisfies({ slot, location: 'home' })).to.be.false;
+            (0, chai_1.expect)(loc.satisfies({ ...slot, location: 'office' })).to.be.true;
+            (0, chai_1.expect)(loc.satisfies({ ...slot, location: 'home' })).to.be.false;
         });
         it('Composite constraint AND works', () => {
             const slot = slots[0];
@@ -75,21 +75,21 @@ describe('timetabling solver (BDD)', () => {
             const notice = new index_1.NoticeConstraint(500);
             const loc = new index_1.LocationConstraint('office');
             const compAnd = new index_1.CompositeConstraint('and', [notice, loc]);
-            (0, chai_1.expect)(compAnd.satisfies({ slot, now, location: 'office' })).to.be.true;
-            (0, chai_1.expect)(compAnd.satisfies({ slot, now, location: 'home' })).to.be.false;
+            (0, chai_1.expect)(compAnd.satisfies({ ...slot, now, location: 'office' })).to.be.true;
+            (0, chai_1.expect)(compAnd.satisfies({ ...slot, now, location: 'home' })).to.be.false;
         });
         it('Composite constraint OR works', () => {
             const slot = slots[0];
             const loc = new index_1.LocationConstraint('office');
             const compOr = new index_1.CompositeConstraint('or', [loc, new index_1.ActivityConstraint('call')]);
-            (0, chai_1.expect)(compOr.satisfies({ slot, location: 'home', activity: 'call' })).to.be.true;
+            (0, chai_1.expect)(compOr.satisfies({ ...slot, location: 'home', activity: 'call' })).to.be.true;
         });
         it('Composite constraint NOT works', () => {
             const slot = slots[0];
             const loc = new index_1.LocationConstraint('office');
             const compNot = new index_1.CompositeConstraint('not', [loc]);
-            (0, chai_1.expect)(compNot.satisfies({ slot, location: 'home' })).to.be.true;
-            (0, chai_1.expect)(compNot.satisfies({ slot, location: 'office' })).to.be.false;
+            (0, chai_1.expect)(compNot.satisfies({ ...slot, location: 'home' })).to.be.true;
+            (0, chai_1.expect)(compNot.satisfies({ ...slot, location: 'office' })).to.be.false;
         });
         it('Unavailable status blocks all contexts regardless of constraints', () => {
             const av = { status: 'unavailable', constraints: [new index_1.TimeConstraint(slots[0].start, slots[3].end)] };
@@ -114,14 +114,14 @@ describe('timetabling solver (BDD)', () => {
             const child = (0, index_1.crossoverGenome)(a, a);
             (0, chai_1.expect)(child.slotIndex).to.equal(a.slotIndex);
         });
-        it('filterFeasibleSlots respects person availability status', () => {
+        it('filterFeasibleSlots respects participant availability status', () => {
             const slotsSmall = [{ start: new Date(0), end: new Date(0) }, { start: new Date(1), end: new Date(1) }];
             const p1 = { name: 'A', availability: { status: 'available', constraints: [] } };
             const p2 = { name: 'B', availability: { status: 'unavailable', constraints: [] } };
             (0, chai_1.expect)((0, index_1.filterFeasibleSlots)(slotsSmall, [p1]).length).to.equal(2);
             (0, chai_1.expect)((0, index_1.filterFeasibleSlots)(slotsSmall, [p1, p2]).length).to.equal(0);
         });
-        it('runGenetic chooses preferred person slot when multiple attitudes', () => {
+        it('runGenetic chooses preferred participant slot when multiple attitudes', () => {
             const slotsSmall = [{ start: new Date(0), end: new Date(0) }];
             const pA = { name: 'A', availability: { status: 'preferred', constraints: [] } };
             const pB = { name: 'B', availability: { status: 'available', constraints: [] } };
@@ -130,9 +130,9 @@ describe('timetabling solver (BDD)', () => {
         });
         it('runGenetic returns null if notice constraint makes every slot infeasible', () => {
             const slotsLong = (0, index_1.generateSlots)(new Date(0), new Date(60 * 60 * 1000), 15);
-            const person = { name: 'N', noticeRequired: 24 * 60 * 60 * 1000 };
+            const participant = { name: 'N', noticeRequired: 24 * 60 * 60 * 1000 };
             // no slots satisfy 24h notice
-            const r = (0, index_1.runGenetic)(slotsLong, [person]);
+            const r = (0, index_1.runGenetic)(slotsLong, [participant]);
             (0, chai_1.expect)(r).to.be.null;
         });
     }); // end GA mechanic behaviors
@@ -226,9 +226,9 @@ describe('timetabling solver (BDD)', () => {
         const notice1h = new index_1.NoticeConstraint(60 * 60 * 1000);
         const nested = new index_1.CompositeConstraint('and', [innerOr, notice1h]);
         const now = new Date(slot.start.getTime() - 2 * 60 * 60 * 1000);
-        (0, chai_1.expect)(nested.satisfies({ slot, now, location: 'office' })).to.be.true;
-        (0, chai_1.expect)(nested.satisfies({ slot, now, activity: 'call' })).to.be.true;
-        (0, chai_1.expect)(nested.satisfies({ slot, now: new Date(slot.start.getTime() - 30 * 60 * 1000), location: 'office' })).to.be.false;
+        (0, chai_1.expect)(nested.satisfies({ ...slot, now, location: 'office' })).to.be.true;
+        (0, chai_1.expect)(nested.satisfies({ ...slot, now, activity: 'call' })).to.be.true;
+        (0, chai_1.expect)(nested.satisfies({ ...slot, now: new Date(slot.start.getTime() - 30 * 60 * 1000), location: 'office' })).to.be.false;
     });
     // ==== advanced real-world scenarios =====================================
     describe('advanced scheduling scenarios', () => {
@@ -274,14 +274,14 @@ describe('timetabling solver (BDD)', () => {
         });
         it('cancellation/rescheduling is handled by updating bookedSlots and re-running GA', () => {
             const slots = (0, index_1.generateSlots)(new Date(2026, 1, 22, 9), new Date(2026, 1, 22, 12), 60);
-            const person = { name: 'Flexible' };
+            const participant = { name: 'Flexible' };
             // first run, pick some slot
-            const first = (0, index_1.runGenetic)(slots, [person], { size: 10, iterations: 10 });
+            const first = (0, index_1.runGenetic)(slots, [participant], { size: 10, iterations: 10 });
             (0, chai_1.expect)(first).to.not.be.null;
             if (first) {
                 // simulate booking the chosen slot
-                person.bookedSlots = [slots[first.slotIndex]];
-                const second = (0, index_1.runGenetic)(slots, [person], { size: 10, iterations: 10 });
+                participant.bookedSlots = [slots[first.slotIndex]];
+                const second = (0, index_1.runGenetic)(slots, [participant], { size: 10, iterations: 10 });
                 // second run should select a different slot or be null if only one slot
                 if (slots.length > 1) {
                     (0, chai_1.expect)(second).to.not.be.null;
@@ -295,12 +295,12 @@ describe('timetabling solver (BDD)', () => {
         });
         it('dynamic availability (last-minute openings) just means recompute with new constraints', () => {
             const slots = (0, index_1.generateSlots)(new Date(2026, 1, 22, 9), new Date(2026, 1, 22, 12), 60);
-            const person = { name: 'Busy', availability: { status: 'unavailable', constraints: [] } };
-            const r1 = (0, index_1.runGenetic)(slots, [person]);
+            const participant = { name: 'Busy', availability: { status: 'unavailable', constraints: [] } };
+            const r1 = (0, index_1.runGenetic)(slots, [participant]);
             (0, chai_1.expect)(r1).to.be.null;
             // later they become available
-            person.availability = { status: 'available', constraints: [] };
-            const r2 = (0, index_1.runGenetic)(slots, [person]);
+            participant.availability = { status: 'available', constraints: [] };
+            const r2 = (0, index_1.runGenetic)(slots, [participant]);
             (0, chai_1.expect)(r2).to.not.be.null;
         });
         it('batch optimization: schedule several showings at once (multi-objective)', () => {
@@ -308,8 +308,8 @@ describe('timetabling solver (BDD)', () => {
             const alice = { name: 'A' };
             const bob = { name: 'B' };
             const meetings = [
-                { slots, people: [alice, bob] },
-                { slots, people: [alice, bob] },
+                { slots, participant: [alice, bob] },
+                { slots, participant: [alice, bob] },
             ];
             const results = (0, index_1.runBatch)(meetings, { size: 10, iterations: 20 });
             (0, chai_1.expect)(results.length).to.equal(2);
@@ -318,7 +318,7 @@ describe('timetabling solver (BDD)', () => {
                 const idx0 = results[0];
             }
         });
-        it('calendar import/export would convert ICS entries to Slot/Person records', () => {
+        it('calendar import/export would convert ICS entries to Slot/Participant records', () => {
             const slots = [
                 { start: new Date(2026, 1, 22, 9), end: new Date(2026, 1, 22, 10) },
             ];
@@ -348,7 +348,7 @@ describe('timetabling solver (BDD)', () => {
             const { result, diagnostics } = (0, index_1.runGeneticDiagnostics)(slots, [buyer]);
             (0, chai_1.expect)(result).to.be.null;
             (0, chai_1.expect)(diagnostics.length).to.be.greaterThan(0);
-            const diag = diagnostics.find(d => d.person === 'B');
+            const diag = diagnostics.find(d => d.participant === 'B');
             (0, chai_1.expect)(diag).to.exist;
             (0, chai_1.expect)(diag?.reason).to.include('hard availability');
         });
@@ -357,7 +357,7 @@ describe('timetabling solver (BDD)', () => {
             const b = { name: 'B', hardAvailability: s => s.start.getHours() >= 11 };
             const { result, diagnostics } = (0, index_1.runGeneticDiagnostics)(slots, [a, b]);
             (0, chai_1.expect)(result).to.be.null;
-            const pair = diagnostics.find(d => d.person === 'A&B');
+            const pair = diagnostics.find(d => d.participant === 'A&B');
             (0, chai_1.expect)(pair).to.exist;
             (0, chai_1.expect)(pair?.reason).to.include('pairwise');
         });
@@ -370,7 +370,7 @@ describe('timetabling solver (BDD)', () => {
             (0, chai_1.expect)(bad.feasible).to.be.false;
             (0, chai_1.expect)(bad.reasons).to.include('invalid slot interval');
         });
-        it('runGeneticDiagnostics handles no people or no slots gracefully', () => {
+        it('runGeneticDiagnostics handles no participant or no slots gracefully', () => {
             const { result: r1, diagnostics: d1 } = (0, index_1.runGeneticDiagnostics)(slots, []);
             (0, chai_1.expect)(r1).to.be.null;
             (0, chai_1.expect)(d1.some(d => d.reason.includes('no participants'))).to.be.true;
@@ -384,28 +384,28 @@ describe('timetabling solver (BDD)', () => {
         it('diagnostics include specific reasons like notice or booked', () => {
             const now = new Date();
             const futureSlots = (0, index_1.generateSlots)(new Date(now.getTime() + 60 * 60 * 1000), new Date(now.getTime() + 5 * 60 * 60 * 1000), 60);
-            const person = {
+            const participant = {
                 name: 'N',
                 noticeRequired: 24 * 60 * 60 * 1000,
                 bookedSlots: [futureSlots[0]],
             };
-            const { result, diagnostics } = (0, index_1.runGeneticDiagnostics)(futureSlots, [person]);
+            const { result, diagnostics } = (0, index_1.runGeneticDiagnostics)(futureSlots, [participant]);
             (0, chai_1.expect)(result).to.be.null;
-            const diag = diagnostics.find(d => d.person === 'N');
+            const diag = diagnostics.find(d => d.participant === 'N');
             (0, chai_1.expect)(diag).to.exist;
             (0, chai_1.expect)(diag?.reason).to.satisfy((r) => r.includes('notice') || r.includes('booked'));
         });
         it('travel-time constraints between back-to-back meetings are expressible', () => {
             const slots = (0, index_1.generateSlots)(new Date(2026, 1, 22, 9), new Date(2026, 1, 22, 13), 60);
-            const person = { name: 'Traveller', minGapMs: 30 * 60 * 1000, bookedSlots: [slots[1]] };
+            const participant = { name: 'Traveller', minGapMs: 30 * 60 * 1000, bookedSlots: [slots[1]] };
             // slot[0] ends at 10, gap required 30m before next booked at 10 -> slot0 invalid
-            (0, chai_1.expect)((0, index_1.isFeasible)(slots[0], person)).to.be.false;
+            (0, chai_1.expect)((0, index_1.isFeasible)(slots[0], participant)).to.be.false;
             // slot[2] starts at 11 which is zero gap -> still invalid
-            (0, chai_1.expect)((0, index_1.isFeasible)(slots[2], person)).to.be.false;
+            (0, chai_1.expect)((0, index_1.isFeasible)(slots[2], participant)).to.be.false;
             // slot[3] starts at 12 which is 1h after booked end -> valid
-            (0, chai_1.expect)((0, index_1.isFeasible)(slots[3], person)).to.be.true;
+            (0, chai_1.expect)((0, index_1.isFeasible)(slots[3], participant)).to.be.true;
         });
-        it('mixed-mode events (in-person OR virtual) can be encoded as activity/location constraints', () => {
+        it('mixed-mode events (in-participant OR virtual) can be encoded as activity/location constraints', () => {
             const slot = { start: new Date(), end: new Date() };
             const av = {
                 status: 'available',
@@ -414,13 +414,13 @@ describe('timetabling solver (BDD)', () => {
                         new index_1.LocationConstraint('virtual'),
                         new index_1.CompositeConstraint('and', [
                             new index_1.LocationConstraint('office'),
-                            new index_1.ActivityConstraint('in-person'),
+                            new index_1.ActivityConstraint('in-participant'),
                         ]),
                     ]),
                 ],
             };
-            const ctx1 = { slot, location: 'virtual' };
-            const ctx2 = { slot, location: 'office', activity: 'in-person' };
+            const ctx1 = { ...slot, location: 'virtual' };
+            const ctx2 = { ...slot, location: 'office', activity: 'in-participant' };
             (0, chai_1.expect)((0, index_1.evaluateAvailability)(av, ctx1)).to.be.true;
             (0, chai_1.expect)((0, index_1.evaluateAvailability)(av, ctx2)).to.be.true;
         });
@@ -443,34 +443,34 @@ describe('timetabling solver (BDD)', () => {
         const b2 = { status: 'available', constraints: [new index_1.TimeConstraint(slots[1].start, slots[2].end)] };
         (0, chai_1.expect)((0, index_1.isCompatible)(a, b2, contexts)).to.be.true;
     });
-    it('Real-world compatibility: morning-only vs afternoon-only persons', () => {
+    it('Real-world compatibility: morning-only vs afternoon-only participants', () => {
         const morning = { status: 'available', constraints: [new index_1.TimeConstraint(slots[0].start, slots[1].end)] };
         const afternoon = { status: 'available', constraints: [new index_1.TimeConstraint(slots[2].start, slots[3].end)] };
         // contexts already span the full day in `contexts`
         (0, chai_1.expect)((0, index_1.isCompatible)(morning, afternoon, contexts)).to.be.false;
-        // if one person relaxes to midday, they become compatible
+        // if one participant relaxes to midday, they become compatible
         const flexible = { status: 'available', constraints: [new index_1.TimeConstraint(slots[1].start, slots[3].end)] };
         (0, chai_1.expect)((0, index_1.isCompatible)(morning, flexible, contexts)).to.be.true;
     });
-    it('Person availability status influences feasibility and preference', () => {
+    it('Participant availability status influences feasibility and preference', () => {
         const slot = slots[0];
-        const availablePerson = { name: 'A', availability: { status: 'available', constraints: [] }, preference: () => 0.5 };
-        (0, chai_1.expect)((0, index_1.isFeasible)(slot, availablePerson)).to.be.true;
-        const unavailablePerson = { name: 'U', availability: { status: 'unavailable', constraints: [] } };
-        (0, chai_1.expect)((0, index_1.isFeasible)(slot, unavailablePerson)).to.be.false;
-        const preferredPerson = { name: 'P', availability: { status: 'preferred', constraints: [] }, preference: () => 0.5 };
+        const availableParticipant = { name: 'A', availability: { status: 'available', constraints: [] }, preference: () => 0.5 };
+        (0, chai_1.expect)((0, index_1.isFeasible)(slot, availableParticipant)).to.be.true;
+        const unavailableParticipant = { name: 'U', availability: { status: 'unavailable', constraints: [] } };
+        (0, chai_1.expect)((0, index_1.isFeasible)(slot, unavailableParticipant)).to.be.false;
+        const preferredParticipant = { name: 'P', availability: { status: 'preferred', constraints: [] }, preference: () => 0.5 };
         // preferenceScore should bump due to preferred
-        const baseScore = (0, index_1.preferenceScore)(slot, availablePerson);
-        const prefScore = (0, index_1.preferenceScore)(slot, preferredPerson);
+        const baseScore = (0, index_1.preferenceScore)(slot, availableParticipant);
+        const prefScore = (0, index_1.preferenceScore)(slot, preferredParticipant);
         (0, chai_1.expect)(prefScore).to.be.greaterThan(baseScore);
     });
-    it('Given a person with preference, then preferenceScore returns the expected value', () => {
+    it('Given a participant with preference, then preferenceScore returns the expected value', () => {
         const slot = slots[0];
-        const person = {
+        const participant = {
             name: 'P',
             preference: s => (s.start.getHours() === 8 ? 0.5 : 1),
         };
-        (0, chai_1.expect)((0, index_1.preferenceScore)(slot, person), 'pref score mismatch').to.equal(0.5);
+        (0, chai_1.expect)((0, index_1.preferenceScore)(slot, participant), 'pref score mismatch').to.equal(0.5);
     });
     it('Given a recurrence rule, isFeasible respects it', () => {
         const slot = slots[0];
@@ -515,16 +515,16 @@ describe('timetabling solver (BDD)', () => {
         const other = { slotIndex: 1 };
         const child = (0, index_1.crossoverGenome)(genome, other);
         (0, chai_1.expect)(child.slotIndex, `crossover produced ${child.slotIndex}`).to.be.oneOf([0, 1]);
-        const person = { name: 'F', hardAvailability: () => true };
-        const feasible = (0, index_1.filterFeasibleSlots)(testSlots, [person]);
+        const participant = { name: 'F', hardAvailability: () => true };
+        const feasible = (0, index_1.filterFeasibleSlots)(testSlots, [participant]);
         (0, chai_1.expect)(feasible, 'all slots should be feasible').to.deep.equal(testSlots);
         const infeasible = { name: 'G', hardAvailability: () => false };
         (0, chai_1.expect)((0, index_1.filterFeasibleSlots)(testSlots, [infeasible]), 'no slots should remain').to.be.empty;
     });
     it('runGenetic returns null when there are no feasible slots', () => {
         const slots = [{ start: new Date(0), end: new Date(0) }];
-        const person = { name: 'Z', hardAvailability: () => false };
-        const result = (0, index_1.runGenetic)(slots, [person]);
+        const participant = { name: 'Z', hardAvailability: () => false };
+        const result = (0, index_1.runGenetic)(slots, [participant]);
         (0, chai_1.expect)(result, 'should be null on unsatisfiable problem').to.be.null;
     });
     it('runGenetic finds the only feasible slot with simple problem', () => {
@@ -534,8 +534,8 @@ describe('timetabling solver (BDD)', () => {
             { start: new Date(2), end: new Date(2) },
         ];
         // only third slot is allowed
-        const person = { name: 'Y', hardAvailability: s => s.start.getTime() === 2 };
-        const result = (0, index_1.runGenetic)(slots, [person], { size: 100, iterations: 200 });
+        const participant = { name: 'Y', hardAvailability: s => s.start.getTime() === 2 };
+        const result = (0, index_1.runGenetic)(slots, [participant], { size: 100, iterations: 200 });
         (0, chai_1.expect)(result, `result was ${result}`).to.not.be.null;
         if (result) {
             (0, chai_1.expect)(result.slotIndex, 'should pick index 2').to.equal(2);
@@ -557,8 +557,8 @@ describe('timetabling solver (BDD)', () => {
     });
     it('runGenetic returns null when no feasible slot exists', () => {
         const slots = (0, index_1.generateSlots)(new Date(0), new Date(2), 60);
-        const badPerson = { name: 'X', hardAvailability: () => false };
-        const result = (0, index_1.runGenetic)(slots, [badPerson]);
+        const badParticipant = { name: 'X', hardAvailability: () => false };
+        const result = (0, index_1.runGenetic)(slots, [badParticipant]);
         (0, chai_1.expect)(result, 'should be unsatisfiable').to.be.null;
     });
     it('runGenetic finds highest preference slot', () => {
@@ -593,10 +593,10 @@ describe('timetabling solver (BDD)', () => {
     });
     it('fitness clamps aggregator results into [0,1]', () => {
         const slots = [{ start: new Date(0), end: new Date(0) }];
-        const person = { name: 'Clamp', hardAvailability: () => true, preference: () => 0.5 };
+        const participant = { name: 'Clamp', hardAvailability: () => true, preference: () => 0.5 };
         const overAgg = () => 2;
-        (0, chai_1.expect)((0, index_1.fitness)({ slotIndex: 0 }, slots, [person], overAgg)).to.equal(1);
+        (0, chai_1.expect)((0, index_1.fitness)({ slotIndex: 0 }, slots, [participant], overAgg)).to.equal(1);
         const underAgg = () => -1;
-        (0, chai_1.expect)((0, index_1.fitness)({ slotIndex: 0 }, slots, [person], underAgg)).to.equal(0);
+        (0, chai_1.expect)((0, index_1.fitness)({ slotIndex: 0 }, slots, [participant], underAgg)).to.equal(0);
     });
 });

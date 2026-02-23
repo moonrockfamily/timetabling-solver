@@ -1,21 +1,45 @@
 import { RRuleSet } from 'rrule';
 import Genetic, { GenerationStats } from 'genetic-js-no-ww';
 import {
+  Constraint,
   Slot,
   evaluateAvailability,
+  evaluateRule,
+  AvailabilityRule,
+  EvaluationContext,
 } from './constraints';
 
 // --- utilities -----------------------------------------------------------
-export interface Person {
+export interface Participant {
   name: string;
+  // legacy single-predicate availability; preserved for backwards
+  // compatibility but most users should prefer `rules` below.
   hardAvailability?: (slot: Slot) => boolean; // returns false if slot is disallowed
-  preference?: (slot: Slot) => number; // [0,1]
-  rruleSet?: RRuleSet; // recurrence set for "available when"
-  noticeRequired?: number; // milliseconds of advance notice
+
+  /**
+   * Global preference function invoked when no rule-specific preference is
+   * provided.  Receives the full evaluation context and returns a score in
+   * [0,1]; a higher value indicates greater desirability.
+   */
+  preference?: (ctx: EvaluationContext) => number; // [0,1]
+
+  /**
+   * A set of detailed availability rules.  If provided, the solver treats the
+   * participant as available for a slot if **any** rule evaluates to true.
+   * Rules may impose constraints on time, location, notice period, recurrence,
+   * etc., allowing the rich scenarios described by users.  When `rules` is
+   * omitted the older combination of fields (`availability`, `rruleSet`,
+   * `noticeRequired`, etc.) is used instead.  Individual rules may also
+   * specify their own `preference` function.
+   */
+  rules?: AvailabilityRule[];
+
+  rruleSet?: RRuleSet; // legacy recurrence set for "available when"
+  noticeRequired?: number; // legacy milliseconds of advance notice
   availability?: {
     status: 'available' | 'unavailable' | 'preferred';
     constraints: any[];
-  }; // high‑level status/constraints
+  }; // high‑level status/constraints (legacy)
   bookedSlots?: Slot[]; // pre-existing meetings / reservations
   minGapMs?: number; // required gap before/after any booked slot
 }
@@ -31,7 +55,51 @@ export interface MultiChromosome {
   durationSlots?: number[]; // parallel array if each meeting needs a duration
 }
 
+
 // --- scheduling helpers --------------------------------------------------
+
+// helpers for availability rules ------------------------------------------------
+
+/**
+ * Convert a participant's legacy availability/rrule/notice fields into a
+ * single rule.  Returns `undefined` if the participant has no legacy data.
+ */
+function legacyRuleFromParticipant(p: Participant): AvailabilityRule | undefined {
+  if (!p.availability && !p.rruleSet && p.noticeRequired === undefined) return undefined;
+  const r: AvailabilityRule = {};
+  if (p.availability) {
+    r.status = p.availability.status;
+    r.constraints = p.availability.constraints as Constraint[];
+  }
+  if (p.rruleSet) {
+    r.rruleSet = p.rruleSet;
+  }
+  if (p.noticeRequired !== undefined) {
+    r.noticeMs = p.noticeRequired;
+  }
+  return r;
+}
+
+/**
+ * Return the set of availability rules that apply to a participant, defaulting
+ * to legacy fields when `rules` is not provided.
+ */
+function participantRules(p: Participant): AvailabilityRule[] {
+  if (p.rules && p.rules.length) return p.rules;
+  const r = legacyRuleFromParticipant(p);
+  return r ? [r] : [];
+}
+
+/**
+ * Generate an array of time slots covering the interval from `start` up to
+ * (but not including) `end`, each slot having duration specified by
+ * `intervalMinutes`.
+ *
+ * @param start - inclusive start date/time for the slot sequence
+ * @param end - exclusive end date/time for the slot sequence
+ * @param intervalMinutes - length of each slot in minutes
+ * @returns array of contiguous `Slot` objects
+ */
 export function generateSlots(start: Date, end: Date, intervalMinutes: number): Slot[] {
   const slots: Slot[] = [];
   let cur = new Date(start);
@@ -43,14 +111,39 @@ export function generateSlots(start: Date, end: Date, intervalMinutes: number): 
   return slots;
 }
 
+/**
+ * Append one or more common participants to each group of participant.  Useful for
+ * any domain in which you have a set of primary groups and need to tack on
+ * shared members (e.g. buyers+agent+homeowner, interview panels + facilitator,
+ * etc.).
+ *
+ * The helper is intentionally generic: you supply the base `groups` and then
+ * zero or more `common` participants.  The latter are concatenated onto every
+ * group.  When no `common` arguments are given the input groups are returned
+ * as shallow copies.
+ *
+ * @param groups - array of participant arrays representing separate meeting groups
+ * @param common - zero or more `Participant` objects to append to every group
+ * @returns new array where each entry is a concatenation of the original
+ *   group with the common participants
+ */
 export function assembleGroups(
-  buyersList: Person[][],
-  agent: Person,
-  homeowner: Person
-): Person[][] {
-  return buyersList.map(buyers => [...buyers, agent, homeowner]);
+  groups: Participant[][],
+  ...common: Participant[]
+): Participant[][] {
+  if (common.length === 0) return groups.map(g => [...g]);
+  return groups.map(g => [...g, ...common]);
 }
 
+/**
+ * Produce a scalariser function that computes a weighted sum of a score
+ * vector using the provided `weights`.
+ *
+ * @param weights - array of weights corresponding to each score index; if a
+ *   weight is undefined, it defaults to 1
+ * @returns function which accepts an array of numbers and returns the
+ *   weighted total
+ */
 export function weightedScalariser(weights: number[]): (scores: number[]) => number {
   return scores => {
     let tot = 0;
@@ -61,27 +154,48 @@ export function weightedScalariser(weights: number[]): (scores: number[]) => num
   };
 }
 
-function evalTimeConstraint(slot: Slot, person: Person): boolean {
-  if (!person.hardAvailability) return true;
-  return person.hardAvailability(slot);
+/**
+ * Check a participant's hard availability function against a single slot.
+ *
+ * @param slot - the time slot under consideration
+ * @param participant - participant whose availability is checked
+ * @returns `true` if either the participant has no hardAvailability or the
+ *   function allows the slot
+ */
+function evalTimeConstraint(slot: Slot, participant: Participant): boolean {
+  if (!participant.hardAvailability) return true;
+  return participant.hardAvailability(slot);
 }
 
-function evalRecurrence(slot: Slot, person: Person): boolean {
-  if (!person.rruleSet) return true;
-  const hits = person.rruleSet.between(slot.start, slot.end, true);
-  return hits.length > 0;
-}
-
-function evalConditions(slot: Slot, person: Person): boolean {
-  if (!person.noticeRequired) return true;
-  const now = new Date();
-  return slot.start.getTime() - now.getTime() >= person.noticeRequired;
-}
-
+/**
+ * Verify that a slot falls within a participant's recurring availability set.
+ *
+ * @param slot - time interval being tested
+ * @param participant - participant with optional `rruleSet` of allowed times
+ * @returns `true` if no recurrence rules exist or the slot intersects the
+ *   rrule set
+ */
+/**
+ * Determine whether two slots overlap in time.
+ *
+ * @param a - first slot
+ * @param b - second slot
+ * @returns `true` if the intervals intersect (strict overlap)
+ */
 function overlaps(a: Slot, b: Slot): boolean {
   return a.start < b.end && b.start < a.end;
 }
 
+/**
+ * Expand a chromosome into the actual time slots it represents.  Supports
+ * multi-slot meetings when `durationSlots` is set.
+ *
+ * @param chrom - chromosome indicating starting index (and optional
+ *   duration in number of slots)
+ * @param slots - full slot array from which indices are drawn
+ * @returns array of one or more consecutive slots corresponding to the
+ *   chromosome
+ */
 function slotRange(chrom: Chromosome, slots: Slot[]): Slot[] {
   if (chrom.durationSlots && chrom.durationSlots > 1) {
     return slots.slice(chrom.slotIndex, chrom.slotIndex + chrom.durationSlots);
@@ -94,9 +208,17 @@ export interface FeasibilityDetail {
   reasons: string[];
 }
 
+/**
+ * Determine whether a given slot (or sequence of slots) is compatible with
+ * a participant's constraints and, if not, accumulate human-readable reasons.
+ *
+ * @param slot - single slot or array of slots to evaluate
+ * @param participant - participant whose restrictions are tested
+ * @returns object containing `feasible` boolean and array of `reasons`
+ */
 export function getFeasibilityDetail(
   slot: Slot | Slot[],
-  person: Person
+  participant: Participant
 ): FeasibilityDetail {
   const slotsToTest: Slot[] = Array.isArray(slot) ? slot : [slot];
   if (slotsToTest.length === 0) {
@@ -113,62 +235,130 @@ export function getFeasibilityDetail(
       add('invalid slot interval');
       continue;
     }
-    if (person.bookedSlots) {
-      for (const b of person.bookedSlots) {
+    if (participant.bookedSlots) {
+      for (const b of participant.bookedSlots) {
         if (overlaps(s, b)) add('overlaps booked slot');
-        if (person.minGapMs) {
+        if (participant.minGapMs) {
           if (
-            s.end.getTime() > b.start.getTime() - person.minGapMs &&
-            s.start.getTime() < b.end.getTime() + person.minGapMs
+            s.end.getTime() > b.start.getTime() - participant.minGapMs &&
+            s.start.getTime() < b.end.getTime() + participant.minGapMs
           ) {
             add('insufficient gap around booked slot');
           }
         }
       }
     }
-    if (person.availability) {
-      const ctx: any = { slot: s };
-      if (!evaluateAvailability(person.availability, ctx)) {
-        if (person.availability.status === 'unavailable') {
-          add('unavailable status');
-        } else {
-          add('availability constraint');
+    // evaluate any availability rules (new API) or legacy fields
+    const ctx: EvaluationContext = {
+      ...s,
+      now: new Date(),
+    };
+    const rules = participantRules(participant);
+    if (rules.length > 0) {
+      let matched = false;
+      let hadPreferred = false;
+      for (const r of rules) {
+        const ok = evaluateRule(r, ctx);
+        if (ok) {
+          matched = true;
+          if (r.status === 'preferred') hadPreferred = true;
+          break; // one rule is enough
         }
       }
+      if (!matched) {
+        add('availability constraint');
+      } else if (hadPreferred) {
+        // annotate but not considered a failure; preference bonus applied
+        // during scoring instead
+      }
     }
-    if (!evalTimeConstraint(s, person)) {
+    // still enforce hardAvailability predicate and bookedSlots/
+    // minGapMs exactly as before
+    if (!evalTimeConstraint(s, participant)) {
       add('hard availability rejection');
-    }
-    if (!evalRecurrence(s, person)) {
-      add('rrule mismatch');
-    }
-    if (!evalConditions(s, person)) {
-      add('notice requirement');
     }
   }
   return { feasible: reasons.length === 0, reasons };
 }
 
-export function isFeasible(slot: Slot | Slot[], person: Person): boolean {
-  return getFeasibilityDetail(slot, person).feasible;
+/**
+ * Quick boolean wrapper around `getFeasibilityDetail`.
+ *
+ * @param slot - slot or slots to check
+ * @param participant - participant being evaluated
+ * @returns `true` when all constraints are satisfied
+ */
+export function isFeasible(slot: Slot | Slot[], participant: Participant): boolean {
+  return getFeasibilityDetail(slot, participant).feasible;
 }
 
-export function preferenceScore(slot: Slot, person: Person): number {
-  let base = person.preference ? Math.max(0, Math.min(1, person.preference(slot))) : 1;
-  if (person.availability?.status === 'preferred') {
-    base = Math.min(1, base + 0.1);
+/**
+ * Compute a normalized preference score for a slot for a given participant.
+ * Scores are clamped to [0,1]; if the participant has a `preference` callback it is
+ * invoked, otherwise a default of 1 is assumed.  A small bonus is applied if
+ * the participant's availability status is explicitly marked `preferred`.
+ *
+ * @param ctx - evaluation context containing slot plus any metadata
+ * @param participant - participant whose preferences are used
+ * @returns score in the range 0..1
+ */
+export function preferenceScore(ctx: EvaluationContext, participant: Participant): number {
+  let base = 1;
+
+  // determine which rules (if any) apply to this context
+  const appliedRules = participantRules(participant).filter(r => evaluateRule(r, ctx));
+
+  if (appliedRules.length > 0) {
+    // if any rule defines a preference, use the highest of those values;
+    // otherwise fall back to the participant-level callback
+    const rulePrefs: number[] = [];
+    let hadPreferredStatus = false;
+    for (const r of appliedRules) {
+      if (r.preference) {
+        rulePrefs.push(Math.max(0, Math.min(1, r.preference(ctx))));
+      }
+      if (r.status === 'preferred') hadPreferredStatus = true;
+    }
+    if (rulePrefs.length > 0) {
+      base = Math.max(...rulePrefs);
+    } else if (participant.preference) {
+      base = Math.max(0, Math.min(1, participant.preference(ctx)));
+    }
+    if (hadPreferredStatus) {
+      base = Math.min(1, base + 0.1);
+    }
+  } else {
+    // no rule matched; fall back to participant-level callback and legacy
+    // availability status
+    if (participant.preference) {
+      base = Math.max(0, Math.min(1, participant.preference(ctx)));
+    }
+    if (participant.availability?.status === 'preferred') {
+      base = Math.min(1, base + 0.1);
+    }
   }
+
   return base;
 }
 
 // --- GA-specific glue ----------------------------------------------------
+/**
+ * Evaluate each sub-chromosome in a multi-objective genome separately.
+ * The returned array contains one fitness score per meeting group.
+ *
+ * @param genome - multi-objective chromosome encoding slot indices (and
+ *   possibly durations) for multiple meetings
+ * @param slots - pool of candidate time slots
+ * @param participantGroups - array of participant arrays corresponding to each meeting
+ * @returns fitness vector where element i is the fitness for group i
+ */
 export function fitnessMulti(
   genome: MultiChromosome,
   slots: Slot[],
-  peopleGroups: Person[][]
+  participantGroups: Participant[][]
 ): number[] {
   return genome.slotIndices.map((idx, i) => {
-    const group = peopleGroups[i] || [];
+    const group = participantGroups[i] || [];
     const chrom: Chromosome = { slotIndex: idx };
     if (genome.durationSlots && genome.durationSlots[i]) {
       chrom.durationSlots = genome.durationSlots[i];
@@ -177,15 +367,29 @@ export function fitnessMulti(
   });
 }
 
+/**
+ * Internal helper to perform a single genetic algorithm run for a
+ * multi-objective scheduling problem.  It configures the GA, including
+ * seeding, mutation, crossover, and fitness calculation, then evolves a
+ * population and returns the best found genome.
+ *
+ * @param slots - available time slots
+ * @param participantGroups - meeting groups to schedule concurrently
+ * @param options - GA tuning parameters
+ * @param scalariser - function to collapse fitness vector to a single
+ *   scalar for the multi-objective optimizer
+ * @param _trace - optional array to collect generation statistics (unused)
+ * @returns best chromosome found or `null` if none
+ */
 function runSingleGeneticMulti(
   slots: Slot[],
-  peopleGroups: Person[][],
+  participantGroups: Participant[][],
   options: GARunOptions,
   scalariser: (scores: number[]) => number,
   _trace?: GenerationStats[]
 ): MultiChromosome | null {
-  const n = peopleGroups.length;
-  const genetic = Genetic.create<MultiChromosome, { slots: Slot[]; peopleGroups: Person[][] }>();
+  const n = participantGroups.length;
+  const genetic = Genetic.create<MultiChromosome, { slots: Slot[]; participantGroups: Participant[][] }>();
   genetic.optimize = Genetic.Optimize.Maximize;
 
   genetic.seed = (): MultiChromosome => {
@@ -223,7 +427,7 @@ function runSingleGeneticMulti(
     return child;
   };
   genetic.fitness = (g: MultiChromosome): number => {
-    const vec = fitnessMulti(g, slots, peopleGroups);
+    const vec = fitnessMulti(g, slots, participantGroups);
     return scalariser(vec);
   };
   genetic.generation = (_pop: any, gen: number, stats: any): boolean =>
@@ -237,7 +441,7 @@ function runSingleGeneticMulti(
       size: options.size ?? 100,
       iterations: options.iterations ?? 500,
     },
-    { slots, peopleGroups }
+    { slots, participantGroups }
   );
 
   let best: MultiChromosome | null = null;
@@ -252,9 +456,98 @@ function runSingleGeneticMulti(
   return best;
 }
 
+/**
+ * High‑level API for running a genetic algorithm on multiple parallel
+ * meetings.  It filters slots to those feasible for all participants, then
+ * executes one or more runs (restarts) to seek an optimal multi-chromosome.
+ *
+ * @param slots - candidate time slots
+ * @param participantGroups - array of participant arrays representing the meetings to
+ *   schedule simultaneously
+ * @param options - GA configuration options such as population size,
+ *   iterations, restarts, and max durations
+ * @param scalariser - function to convert a vector of per-meeting fitness
+ *   scores to a single scalar (default averages them)
+ * @returns best found `MultiChromosome`, or `null` when no feasible slot
+ *   exists for all meetings
+ */
+export interface RankedMultiChromosome {
+  chromosome: MultiChromosome;
+  fitness: number;
+}
+
+function collectMultiGeneticPopulation(
+  slots: Slot[],
+  participantGroups: Participant[][],
+  options: GARunOptions,
+  scalariser: (scores: number[]) => number
+): RankedMultiChromosome[] {
+  const n = participantGroups.length;
+  const genetic = Genetic.create<MultiChromosome, { slots: Slot[]; participantGroups: Participant[][] }>();
+  genetic.optimize = Genetic.Optimize.Maximize;
+
+  genetic.seed = (): MultiChromosome => {
+    const base: MultiChromosome = { slotIndices: [] };
+    for (let i = 0; i < n; i++) {
+      base.slotIndices.push(Math.floor(Math.random() * slots.length));
+    }
+    if (options.maxDurationSlots && options.maxDurationSlots > 1) {
+      base.durationSlots = [];
+      for (let i = 0; i < n; i++) {
+        base.durationSlots.push(1 + Math.floor(Math.random() * options.maxDurationSlots));
+      }
+    }
+    return base;
+  };
+  genetic.mutate = (g: MultiChromosome): MultiChromosome => {
+    const copy: MultiChromosome = { ...g, slotIndices: [...g.slotIndices] };
+    const idx = Math.floor(Math.random() * n);
+    copy.slotIndices[idx] = Math.floor(Math.random() * slots.length);
+    if (options.maxDurationSlots && options.maxDurationSlots > 1) {
+      if (!copy.durationSlots) copy.durationSlots = [];
+      const newDur = 1 + Math.floor(Math.random() * options.maxDurationSlots);
+      copy.durationSlots[idx] = newDur;
+    }
+    return copy;
+  };
+  genetic.crossover = (
+    a: MultiChromosome,
+    b: MultiChromosome
+  ): MultiChromosome => {
+    const child: MultiChromosome = { slotIndices: [] };
+    for (let i = 0; i < n; i++) {
+      child.slotIndices.push(Math.random() < 0.5 ? a.slotIndices[i] : b.slotIndices[i]);
+    }
+    return child;
+  };
+  genetic.fitness = (g: MultiChromosome): number => {
+    const vec = fitnessMulti(g, slots, participantGroups);
+    return scalariser(vec);
+  };
+  genetic.generation = (_pop: any, gen: number, stats: any): boolean =>
+    gen < (options.iterations ?? 500) && stats.max < 1;
+  genetic.notification = (_pop: any, gen: number, stats: any, finished: boolean): void => {
+    if (options.notification) options.notification(_pop, gen, stats, finished);
+  };
+
+  genetic.evolve(
+    {
+      size: options.size ?? 100,
+      iterations: options.iterations ?? 500,
+    },
+    { slots, participantGroups }
+  );
+
+  const results: RankedMultiChromosome[] = [];
+  for (const e of genetic.entities) {
+    results.push({ chromosome: e, fitness: genetic.fitness(e) });
+  }
+  return results;
+}
+
 export function runGeneticMulti(
   slots: Slot[],
-  peopleGroups: Person[][],
+  participantGroups: Participant[][],
   options: GARunOptions = {},
   scalariser: (scores: number[]) => number = scores => {
     if (scores.length === 0) return 0;
@@ -262,7 +555,7 @@ export function runGeneticMulti(
   }
 ): MultiChromosome | null {
   const feasible = slots.filter(s =>
-    peopleGroups.every(pg => pg.every(p => isFeasible(s, p)))
+    participantGroups.every(pg => pg.every(p => isFeasible(s, p)))
   );
   if (feasible.length === 0) return null;
 
@@ -271,9 +564,9 @@ export function runGeneticMulti(
   let bestFitness: number | null = null;
 
   for (let i = 0; i < runs; i++) {
-    const candidate = runSingleGeneticMulti(slots, peopleGroups, options, scalariser);
+    const candidate = runSingleGeneticMulti(slots, participantGroups, options, scalariser);
     if (!candidate) continue;
-    const score = scalariser(fitnessMulti(candidate, slots, peopleGroups));
+    const score = scalariser(fitnessMulti(candidate, slots, participantGroups));
     if (bestFitness === null || score > bestFitness) {
       bestFitness = score;
       bestResult = candidate;
@@ -284,6 +577,51 @@ export function runGeneticMulti(
   return bestResult;
 }
 
+/**
+ * Return the top‑N multi‑chromosomes sorted by fitness.
+ */
+export function runGeneticMultiTopN(
+  slots: Slot[],
+  participantGroups: Participant[][],
+  n: number = 10,
+  options: GARunOptions = {},
+  scalariser: (scores: number[]) => number = scores => {
+    if (scores.length === 0) return 0;
+    return scores.reduce((a, b) => a + b, 0) / scores.length;
+  }
+): RankedMultiChromosome[] {
+  const feasible = slots.filter(s =>
+    participantGroups.every(pg => pg.every(p => isFeasible(s, p)))
+  );
+  if (feasible.length === 0) return [];
+
+  const runs = options.restarts && options.restarts > 1 ? options.restarts : 1;
+  const seen = new Set<string>();
+  const collected: RankedMultiChromosome[] = [];
+
+  for (let i = 0; i < runs; i++) {
+    const pop = collectMultiGeneticPopulation(slots, participantGroups, options, scalariser);
+    for (const entry of pop) {
+      const sig = JSON.stringify(entry.chromosome);
+      if (!seen.has(sig)) {
+        seen.add(sig);
+        collected.push(entry);
+      }
+    }
+  }
+
+  collected.sort((a, b) => b.fitness - a.fitness);
+  return collected.slice(0, n);
+}
+
+/**
+ * Randomly perturb a chromosome by choosing a new slot index (and adjusting
+ * duration if present).  Used as the GA mutation operator.
+ *
+ * @param genome - original chromosome to mutate
+ * @param slots - slot pool from which a new index is drawn
+ * @returns mutated chromosome copy
+ */
 export function mutateGenome(genome: Chromosome, slots: Slot[]): Chromosome {
   const copy: Chromosome = { ...genome };
   copy.slotIndex = Math.floor(Math.random() * slots.length);
@@ -297,6 +635,15 @@ export function mutateGenome(genome: Chromosome, slots: Slot[]): Chromosome {
   return copy;
 }
 
+/**
+ * Simple crossover operator for two chromosomes: randomly selects one of the
+ * parents and returns a shallow copy.  This is effectively a no-op but kept
+ * for API consistency with genetic-js.
+ *
+ * @param a - first parent chromosome
+ * @param b - second parent chromosome
+ * @returns chosen parent copy
+ */
 export function crossoverGenome(
   a: Chromosome,
   b: Chromosome
@@ -305,30 +652,64 @@ export function crossoverGenome(
   return { ...parent };
 }
 
-export function filterFeasibleSlots(slots: Slot[], people: Person[]): Slot[] {
-  return slots.filter(s => people.every(p => isFeasible(s, p)));
+/**
+ * Return a subset of slots that are simultaneously feasible for all
+ * specified participant.
+ *
+ * @param slots - pool of slots to filter
+ * @param participant - participants whose constraints must all be met
+ * @returns array of slots that pass every participant's feasibility check
+ */
+export function filterFeasibleSlots(slots: Slot[], participant: Participant[]): Slot[] {
+  return slots.filter(s => participant.every(p => isFeasible(s, p)));
 }
 
 export type Aggregator = (scores: number[]) => number;
 
+/**
+ * Default aggregation strategy for combining multiple preference scores:
+ * returns the minimum (i.e. worst) score, or 1 if the array is empty.
+ *
+ * @param scores - array of numeric scores
+ * @returns aggregated value in [0,1]
+ */
 export function defaultAggregator(scores: number[]): number {
   if (scores.length === 0) return 1;
   return Math.min(...scores);
 }
 
+/**
+ * Compute the fitness of a chromosome with respect to a set of participant.
+ * The fitness is the aggregated preference score across all participants,
+ * but any infeasibility causes a zero score.
+ *
+ * @param genome - chromosome encoding a slot selection (and optional
+ *   duration)
+ * @param slots - available slot list
+ * @param participants - participants to evaluate
+ * @param aggregator - function to combine individual preference numbers
+ *   into a single fitness value (defaults to `defaultAggregator`)
+ * @returns normalized fitness value between 0 and 1
+ */
 export function fitness(
   genome: Chromosome,
   slots: Slot[],
-  people: Person[],
+  participants: Participant[],
   aggregator: Aggregator = defaultAggregator
 ): number {
   const range = slotRange(genome, slots);
   const prefs: number[] = [];
-  for (const p of people) {
+  for (const p of participants) {
     if (!isFeasible(range, p)) {
       return 0;
     }
-    const scores = range.map(s => preferenceScore(s, p));
+    const scores = range.map(s => {
+      const ctx: EvaluationContext = {
+        ...s,
+        now: new Date(),
+      };
+      return preferenceScore(ctx, p);
+    });
     prefs.push(scores.reduce((a,b)=>a+b,0)/scores.length);
   }
   const result = aggregator(prefs);
@@ -343,9 +724,18 @@ export interface GARunOptions {
   notification?: (pop: unknown[], gen: number, stats: GenerationStats, finished: boolean) => void;
 }
 
+/**
+ * Heuristically derive reasonable GA options based on problem size.
+ *
+ * @param slots - available slots for scheduling
+ * @param meetings - array of meeting objects (only their `participant` property
+ *   is considered here)
+ * @returns a `GARunOptions` object with `size`, `iterations`, and `restarts`
+ *   calculated
+ */
 export function estimateOptions(
   slots: Slot[],
-  meetings: { people: Person[] }[] = []
+  meetings: { participant: Participant[] }[] = []
 ): GARunOptions {
   const slotCount = slots.length;
   const meetingCount = meetings.length;
@@ -360,14 +750,26 @@ export function estimateOptions(
 // helper for doing one execution of the GA; the outer wrapper can call
 // this multiple times when the `restarts` option is set.
 // internal helper that optionally records generation statistics
+/**
+ * Internal utility to run the genetic algorithm once for a single meeting.
+ * Configures population operators, evolves the population, and returns the
+ * best chromosome.
+ *
+ * @param slots - candidate slots
+ * @param participant - participants in the meeting
+ * @param options - GA parameters such as size, iterations, etc.
+ * @param aggregator - fitness aggregation function
+ * @param _trace - optional stats trace collector (unused)
+ * @returns best chromosome or `null` if none found
+ */
 function runSingleGenetic(
   slots: Slot[],
-  people: Person[],
+  participant: Participant[],
   options: GARunOptions,
   aggregator: Aggregator,
   _trace?: GenerationStats[]
 ): Chromosome | null {
-  const genetic = Genetic.create<Chromosome, { slots: Slot[]; people: Person[] }>();
+  const genetic = Genetic.create<Chromosome, { slots: Slot[]; participant: Participant[] }>();
   genetic.optimize = Genetic.Optimize.Maximize;
   genetic.select1 = Genetic.Select1.Tournament2;
   genetic.select2 = Genetic.Select2.Tournament2;
@@ -390,7 +792,7 @@ function runSingleGenetic(
   genetic.crossover = (a: Chromosome, b: Chromosome): Chromosome => {
     return Math.random() < 0.5 ? a : b;
   };
-  genetic.fitness = (g: Chromosome): number => fitness(g, slots, people, aggregator);
+  genetic.fitness = (g: Chromosome): number => fitness(g, slots, participant, aggregator);
   genetic.generation = (
     pop: Chromosome[],
     gen: number,
@@ -413,7 +815,7 @@ function runSingleGenetic(
       size: options.size ?? 100,
       iterations: options.iterations ?? 500,
     },
-    { slots, people }
+    { slots, participant }
   );
 
   let bestEntity: Chromosome | null = null;
@@ -428,13 +830,96 @@ function runSingleGenetic(
   return bestEntity;
 }
 
+/**
+ * Public wrapper to schedule a single meeting via genetic algorithm.
+ * It first eliminates impossible slots before performing one or more GA runs
+ * (according to `restarts`) and returns the best found chromosome.
+ *
+ * @param slots - available time slots
+ * @param participant - participants to include in the meeting
+ * @param options - optional GA configuration
+ * @param aggregator - how individual preference scores are reduced to a
+ *   single fitness value
+ * @returns chosen `Chromosome` or `null` if no feasible time exists
+ */
+export interface RankedChromosome {
+  chromosome: Chromosome;
+  fitness: number;
+}
+
+/**
+ * Perform a genetic run and collect all entities along with their fitness
+ * values.  Used internally by the `TopN` helpers.
+ */
+function collectSingleGeneticPopulation(
+  slots: Slot[],
+  participant: Participant[],
+  options: GARunOptions,
+  aggregator: Aggregator
+): RankedChromosome[] {
+  const genetic = Genetic.create<Chromosome, { slots: Slot[]; participant: Participant[] }>();
+  genetic.optimize = Genetic.Optimize.Maximize;
+  genetic.select1 = Genetic.Select1.Tournament2;
+  genetic.select2 = Genetic.Select2.Tournament2;
+
+  genetic.seed = (): Chromosome => {
+    const base: Chromosome = { slotIndex: Math.floor(Math.random() * slots.length) };
+    if (options.maxDurationSlots && options.maxDurationSlots > 1) {
+      base.durationSlots = 1 + Math.floor(Math.random() * options.maxDurationSlots);
+    }
+    return base;
+  };
+  genetic.mutate = (g: Chromosome): Chromosome => {
+    const copy: Chromosome = { ...g };
+    copy.slotIndex = Math.floor(Math.random() * slots.length);
+    if (options.maxDurationSlots && options.maxDurationSlots > 1) {
+      copy.durationSlots = 1 + Math.floor(Math.random() * options.maxDurationSlots);
+    }
+    return copy;
+  };
+  genetic.crossover = (a: Chromosome, b: Chromosome): Chromosome => {
+    return Math.random() < 0.5 ? a : b;
+  };
+  genetic.fitness = (g: Chromosome): number => fitness(g, slots, participant, aggregator);
+  genetic.generation = (
+    pop: Chromosome[],
+    gen: number,
+    stats: GenerationStats
+  ): boolean => {
+    if (options.notification) options.notification(pop, gen, stats, false);
+    return gen < (options.iterations ?? 500) && stats.max < 1;
+  };
+  genetic.notification = (
+    pop: Chromosome[],
+    gen: number,
+    stats: GenerationStats,
+    finished: boolean
+  ): void => {
+    if (options.notification) options.notification(pop, gen, stats, finished);
+  };
+
+  genetic.evolve(
+    {
+      size: options.size ?? 100,
+      iterations: options.iterations ?? 500,
+    },
+    { slots, participant }
+  );
+
+  const results: RankedChromosome[] = [];
+  for (const e of genetic.entities) {
+    results.push({ chromosome: e, fitness: genetic.fitness(e) });
+  }
+  return results;
+}
+
 export function runGenetic(
   slots: Slot[],
-  people: Person[],
+  participant: Participant[],
   options: GARunOptions = {},
   aggregator: Aggregator = defaultAggregator
 ): Chromosome | null {
-  const feasible = filterFeasibleSlots(slots, people);
+  const feasible = filterFeasibleSlots(slots, participant);
   if (feasible.length === 0) return null;
 
   const runs = options.restarts && options.restarts > 1 ? options.restarts : 1;
@@ -442,9 +927,9 @@ export function runGenetic(
   let bestFitness: number | null = null;
 
   for (let i = 0; i < runs; i++) {
-    const candidate = runSingleGenetic(slots, people, options, aggregator);
+    const candidate = runSingleGenetic(slots, participant, options, aggregator);
     if (!candidate) continue;
-    const score = fitness(candidate, slots, people, aggregator);
+    const score = fitness(candidate, slots, participant, aggregator);
     if (bestFitness === null || score > bestFitness) {
       bestFitness = score;
       bestResult = candidate;
@@ -455,32 +940,85 @@ export function runGenetic(
   return bestResult;
 }
 
+/**
+ * Return the top‑N chromosomes sorted by fitness.  Useful for generating a
+ * ranked list of suggestions rather than just a single best choice.
+ *
+ * @param slots - candidate slots
+ * @param participant - meeting participants
+ * @param n - number of results desired (defaults to 10)
+ * @param options - GA configuration options
+ * @param aggregator - fitness aggregation function
+ * @returns array of objects containing `chromosome` and its `fitness`, sorted
+ *   in descending order; may return fewer than `n` if there are not enough
+ *   distinct candidates
+ */
+export function runGeneticTopN(
+  slots: Slot[],
+  participant: Participant[],
+  n: number = 10,
+  options: GARunOptions = {},
+  aggregator: Aggregator = defaultAggregator
+): RankedChromosome[] {
+  const feasible = filterFeasibleSlots(slots, participant);
+  if (feasible.length === 0) return [];
+
+  const runs = options.restarts && options.restarts > 1 ? options.restarts : 1;
+  const seen = new Set<string>();
+  const collected: RankedChromosome[] = [];
+
+  for (let i = 0; i < runs; i++) {
+    const pop = collectSingleGeneticPopulation(slots, participant, options, aggregator);
+    for (const entry of pop) {
+      const sig = JSON.stringify(entry.chromosome);
+      if (!seen.has(sig)) {
+        seen.add(sig);
+        collected.push(entry);
+      }
+    }
+  }
+
+  collected.sort((a, b) => b.fitness - a.fitness);
+  return collected.slice(0, n);
+}
+
 export interface Diagnostic {
-  person: string;
+  participant: string;
   reason: string;
 }
 
+/**
+ * Run the genetic scheduler and, in case of failure, provide diagnostic
+ * information explaining why no meeting time could be found.
+ *
+ * @param slots - candidate slots
+ * @param participant - meeting participants
+ * @param options - GA run options
+ * @param aggregator - fitness aggregation function
+ * @returns object containing the `result` chromosome (or null) and a list of
+ *   `diagnostics` describing infeasibilities
+ */
 export function runGeneticDiagnostics(
   slots: Slot[],
-  people: Person[],
+  participant: Participant[],
   options: GARunOptions = {},
   aggregator: Aggregator = defaultAggregator
 ): { result: Chromosome | null; diagnostics: Diagnostic[] } {
   const diagnostics: Diagnostic[] = [];
 
-  if (people.length === 0) {
-    diagnostics.push({ person: 'none', reason: 'no participants provided' });
+  if (participant.length === 0) {
+    diagnostics.push({ participant: 'none', reason: 'no participants provided' });
     return { result: null, diagnostics };
   }
 
   if (slots.length === 0) {
-    diagnostics.push({ person: 'none', reason: 'no slots provided' });
+    diagnostics.push({ participant: 'none', reason: 'no slots provided' });
     return { result: null, diagnostics };
   }
 
-  const result = runGenetic(slots, people, options, aggregator) as Chromosome | null;
+  const result = runGenetic(slots, participant, options, aggregator) as Chromosome | null;
   if (result === null) {
-    for (const p of people) {
+    for (const p of participant) {
       const slotReasons: Set<string> = new Set();
       for (const s of slots) {
         const det = getFeasibilityDetail(s, p);
@@ -489,39 +1027,50 @@ export function runGeneticDiagnostics(
       if (slotReasons.size === 0) continue;
       if (slots.every(s => !getFeasibilityDetail(s, p).feasible)) {
         diagnostics.push({
-          person: p.name,
+          participant: p.name,
           reason: `all slots fail for ${p.name}; reasons: ${[...slotReasons].join(', ')}`,
         });
       }
     }
 
-    for (let i = 0; i < people.length; i++) {
-      for (let j = i + 1; j < people.length; j++) {
-        const pa = people[i];
-        const pb = people[j];
+    for (let i = 0; i < participant.length; i++) {
+      for (let j = i + 1; j < participant.length; j++) {
+        const pa = participant[i];
+        const pb = participant[j];
         const ok = slots.some(s =>
           getFeasibilityDetail(s, pa).feasible &&
           getFeasibilityDetail(s, pb).feasible
         );
         if (!ok) {
           diagnostics.push({
-            person: `${pa.name}&${pb.name}`,
+            participant: `${pa.name}&${pb.name}`,
             reason: 'pairwise incompatibility',
           });
         }
       }
     }
 
-    diagnostics.push({ person: 'all', reason: 'no slot satisfies everyone simultaneously' });
+    diagnostics.push({ participant: 'all', reason: 'no slot satisfies everyone simultaneously' });
   }
   return { result, diagnostics };
 }
 
 export interface Meeting {
   slots: Slot[];
-  people: Person[];
+  participant: Participant[];
 }
 
+/**
+ * Schedule a batch of meetings sequentially, updating each participant's
+ * `bookedSlots` when a meeting is successfully placed.  Utilises
+ * `runGenetic` for each individual meeting.
+ *
+ * @param meetings - array of meeting objects containing `slots` and `participant`
+ * @param options - GA configuration options applied to every meeting
+ * @param aggregator - fitness aggregation function
+ * @returns array of results corresponding to each meeting (chromosome or
+ *   null)
+ */
 export function runBatch(
   meetings: Meeting[],
   options: GARunOptions = {},
@@ -529,11 +1078,11 @@ export function runBatch(
 ): (Chromosome | null)[] {
   const results: (Chromosome | null)[] = [];
   for (const m of meetings) {
-    const r = runGenetic(m.slots, m.people, options, aggregator) as Chromosome | null;
+    const r = runGenetic(m.slots, m.participant, options, aggregator) as Chromosome | null;
     results.push(r);
     if (r) {
       const chosen = slotRange(r, m.slots);
-      for (const p of m.people) {
+      for (const p of m.participant) {
         p.bookedSlots = p.bookedSlots ? [...p.bookedSlots, ...chosen] : [...chosen];
       }
     }

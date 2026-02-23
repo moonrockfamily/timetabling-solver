@@ -1,11 +1,10 @@
 # Timetabling Solver Demo
 
 This small project shows how to turn an algebraic availability model into a
-heuristic optimizer using `genetic-js-no-ww`.  It corresponds to the outline
-from the conversation:
+heuristic optimizer using `genetic-js-no-ww`.  It corresponds to the outline:
 
 * availability predicates → feasibility functions
-* preference weights → fitness scores
+* preference weights → fitness scores (preference callbacks receive extra context)
 * `rrule` recurrence and conditional logic are supported
 * genetic representation is just a slot index on a discretised timeline
 
@@ -28,21 +27,31 @@ npm start            # run compiled JS
 npm run dev          # run TypeScript directly via ts-node
 ```
 
-## Quick start example
+## Examples
 
-```ts
-import { generateSlots, runGenetic } from '@moonrockfamily/timetabling-solver';
+A more comprehensive set of usage scenarios lives in `examples/sample.ts`
+(which `npm run dev` will execute directly).  It demonstrates:
 
-const slots = generateSlots(new Date(2026,1,22,9), new Date(2026,1,22,17), 60);
-const person = { name: 'Alice', preference: s => s.start.getHours() < 12 ? 1 : 0 };
+* simple group meeting with shared room and per-participant preferences
+* multi-objective scheduling of several showings with agent and room
+* a complex scenario featuring hard-availability, composite constraints,
+  duration requirements and a pool of resources with distinct bookings
 
-const result = runGenetic(slots, [person]);
-console.log(result);
-```
+Output is verbose and highlights feasibility, preference scores and
+constraint descriptions – see the file for full details, or copy it as a
+starting point for your own experiments.  In particular the examples show
+how slots can carry additional metadata (e.g. `activity` or `location`) so
+that availability constraints may filter not just on time but on those
+attributes as well.
 
 The full API surface is exported from the package root; see `src/index.ts` for
 TypeScript definitions and additional helpers (`runGeneticMulti`,
-`assembleGroups`, etc.).  
+`runGeneticTopN` and `runGeneticMultiTopN` for producing ranked lists of
+suggestions, `assembleGroups` – a small utility to append common participants
+to each meeting group.  It takes a two‑argument form
+`assembleGroups(groups, ...common)` where `groups` is an array of participant
+arrays and `common` are the shared participants; any number of `common`
+values may be provided –, etc.).
 
 ### Tuning the genetic search
 
@@ -56,7 +65,7 @@ consistency by:
    best result:
 
 ```ts
-const best = runGenetic(slots, people, {
+const best = runGenetic(slots, participant, {
   size: 50,
   iterations: 50,
   restarts: 10,      // try ten independent runs
@@ -76,7 +85,7 @@ how many meetings you’re scheduling:
 import { estimateOptions } from '@moonrockfamily/timetabling-solver';
 
 const opts = estimateOptions(slots, meetings);
-runGenetic(slots, people, opts);
+runGenetic(slots, participant, opts);
 ```
 
 The heuristic values are simple and capped (size is never more than 200) but
@@ -90,7 +99,7 @@ an outer genetic algorithm that *tunes the tunable parameters themselves*.
 The idea is simple:
 
 1. Define a small suite of representative problems – different slot sets,
-   people, constraints, etc., ideally reflecting the kinds of schedules you
+   participant, constraints, etc., ideally reflecting the kinds of schedules you
    expect in production.
 2. Treat the GA configuration (`size`, `iterations`, `restarts`, possibly
    mutation/crossover rates or other genetic-js settings) as a chromosome.
@@ -119,7 +128,7 @@ training pass you can reuse the helper to perform a handful of exploratory
 runs and see which settings tend to perform well on your workload.
 
 ```ts
-const best = runGenetic(slots, people, {
+const best = runGenetic(slots, participant, {
   size: 50,
   iterations: 50,
   restarts: 10,      // try ten independent runs
@@ -138,7 +147,7 @@ each generation with the current population, generation number, statistics and
 finished flag.
 
 ```ts
-runGenetic(slots, people, {
+runGenetic(slots, participant, {
   size: 50,
   iterations: 100,
   notification: (pop, gen, stats, finished) => {
@@ -151,11 +160,17 @@ runGenetic(slots, people, {
 
 ## Development
 
+During development you can run the example scenarios directly:
 
-The sample scenario in `src/index.ts` generates slots over the next two days
-and defines two people (Alice & Bob) with different constraints.  The genetic
-algorithm finds a slot that satisfies both and maximises the minimum
-preference value.
+```bash
+npm run dev          # executes examples/sample.ts via ts-node
+npm start            # runs the compiled JS variant (or falls back to ts-node)
+```
 
-Feel free to adapt the `people` array, slot generation, or the fitness
+Type definitions and helper functions are located in `src/` modules; the
+code is bare‑bones by design so you can read and tweak it as needed.  The
+useful `examples/sample.ts` file serves both as a test harness and as
+illustrative documentation, showing how to compose availability constraints,
+set up resources, and interpret solver output.
+Feel free to adapt the `participant` array, slot generation, or the fitness
 definition for your own requirements.
