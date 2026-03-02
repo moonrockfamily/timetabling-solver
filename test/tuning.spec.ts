@@ -1,72 +1,74 @@
 import { expect } from 'chai';
+import { addMinutes } from 'date-fns/fp';
 import {
   defaultFeatureExtractor,
   tuneGAOptions,
   adaptGAOptions,
   buildTuningModel,
   GARunOptions,
+  Rule,
 } from '../src/index';
 
 // the solver functions imported for convenience
 import { runGenetic, preferenceScore } from '../src/index';
 
+// helper for creating small minute-based dates
+const minutesSinceEpoch = (n: number) => addMinutes(n)(new Date(0));
+
 // minimal stub used by several tests
 const slots3 = [
-  { start: new Date(0), end: new Date(1) },
-  { start: new Date(1), end: new Date(2) },
-  { start: new Date(2), end: new Date(3) },
+  { start: minutesSinceEpoch(0), end: minutesSinceEpoch(1) },
+  { start: minutesSinceEpoch(1), end: minutesSinceEpoch(2) },
+  { start: minutesSinceEpoch(2), end: minutesSinceEpoch(3) },
 ];
-const participantPrefersFirst: any = { name: 'P', preference: (s: any) => (s.start.getTime() === 0 ? 1 : 0) };
+const participantPrefersFirst: any = { name: 'P', preference: (s: any) => (s.start.getTime() === minutesSinceEpoch(0).getTime() ? 1 : 0) };
 
 describe('tuning helpers', () => {
-  it('defaultFeatureExtractor counts slots, participant, constraint types and bookings', () => {
+  it('defaultFeatureExtractor counts slots, participants, rules and rule hints', () => {
     const slots = [{ start: new Date(0), end: new Date(1) }];
     const participant: any = {
       name: 'C',
-      availability: { status: 'available', constraints: [{ kind: 'time', satisfies: () => true }] },
+      // a single constant rule; inference should mark it as not depending on
+      // slot or now.
+      rules: [() => 1],
       bookedSlots: [{ start: new Date(5), end: new Date(6) }],
     };
     const feat = defaultFeatureExtractor({ slots, participant: [participant] });
-    // slot count, participant count, then five specific constraint kinds,
-    // a catch-all "other" count, then booked/pref/hard/notice counts
-    expect(feat).to.have.length(12);
+    // slots, participants, rules, slotDeps, nowDeps, booked, pref, hard,
+    // notice
+    expect(feat).to.have.length(9);
     expect(feat[0]).to.equal(1); // slots
     expect(feat[1]).to.equal(1); // participant
-    expect(feat[2]).to.equal(1); // time constraints
-    expect(feat[3]).to.equal(0); // notice constraints
-    expect(feat[4]).to.equal(0); // activity
-    expect(feat[5]).to.equal(0); // location
-    expect(feat[6]).to.equal(0); // composite
-    expect(feat[7]).to.equal(0); // other
-    expect(feat[8]).to.equal(1); // booked
-    expect(feat[9]).to.equal(0); // preference
-    expect(feat[10]).to.equal(0); // hardAvailability
-    expect(feat[11]).to.equal(0); // noticeRequired
+    expect(feat[2]).to.equal(1); // rule count
+    expect(feat[3]).to.equal(0); // slot-dependent rules
+    expect(feat[4]).to.equal(0); // now-dependent rules
+    expect(feat[5]).to.equal(1); // booked
+    expect(feat[6]).to.equal(0); // preference
+    expect(feat[7]).to.equal(0); // hardAvailability
+    expect(feat[8]).to.equal(0); // noticeRequired
   });
 
-  it('recognizes multiple constraint kinds in feature vector', () => {
+  it('recognizes rule counts and dependency hints', () => {
     const slots = [{ start: new Date(0), end: new Date(1) }];
+    // build a variety of rules so we can test hint counting
+    const slotRule = new Rule((ctx: any) =>
+      ctx.start ? 1 : 0
+    );
+    const nowRule = new Rule((ctx: any) =>
+      ctx.now ? 1 : 0
+    );
+    const bothRule = new Rule((ctx: any) =>
+      ctx.start && ctx.now ? 1 : 0
+    );
+    const plainRule = () => 1; // no hints
     const participant: any = {
       name: 'C',
-      availability: {
-        status: 'available',
-        constraints: [
-          { kind: 'time', satisfies: () => true },
-          { kind: 'location', satisfies: () => true },
-          { kind: 'activity', satisfies: () => true },
-          { kind: 'composite', satisfies: () => true },
-          { kind: 'notice', satisfies: () => true },
-          { kind: 'x-custom', satisfies: () => true },
-        ],
-      },
+      rules: [slotRule, nowRule, bothRule, plainRule],
     };
     const feat = defaultFeatureExtractor({ slots, participant: [participant] });
-    expect(feat[2]).to.equal(1); // time
-    expect(feat[3]).to.equal(1); // notice
-    expect(feat[4]).to.equal(1); // activity
-    expect(feat[5]).to.equal(1); // location
-    expect(feat[6]).to.equal(1); // composite
-    expect(feat[7]).to.equal(1); // other (x-custom)
+    expect(feat[2]).to.equal(4); // total rule count
+    expect(feat[3]).to.equal(2); // slot-dependent rules (slotRule + bothRule)
+    expect(feat[4]).to.equal(2); // now-dependent rules (nowRule + bothRule)
   });
 
   it('runMetaGA can tune GA options for a trivial scheduling problem', function() {

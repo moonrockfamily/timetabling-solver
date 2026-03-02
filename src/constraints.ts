@@ -6,20 +6,36 @@ import { AvailabilityRule, evaluateRule, availabilityToRule } from './rules';
 // a single time slot that may carry arbitrary metadata used by
 // activity/location constraints and preference functions.  callers
 // (like `generateSlots`) create the slots; they can annotate each
-// slot with `activity`, `location` or any other fields the application
-// needs.  the solver will automatically copy those properties into the
-// evaluation context when checking constraints.
-// slot objects are pure time intervals.  metadata such as activity or
-// location lives only in the evaluation context so that the rule dependency
-// detector can focus on the fields the scheduler actually controls.
+// slot with `activity`, `location` or any other custom fields the
+// application requires (e.g. "room", "zoom", "priceTier", etc.).
+// whenever the scheduler builds an EvaluationContext it simply spreads the
+// slot object into the context, so *any* extra properties automatically
+// become available to rules and preferences.  this is the core of the
+// extensibility model: add whatever you need to slots, and your rules can
+// read them without further plumbing.
+// slot objects are otherwise pure time intervals.  metadata is kept on the
+// slot so that the rule dependency detector can focus only on data the
+// scheduler actually controls (start, end, now, plus whatever you choose
+// to attach).
 export type Slot = { start: Date; end: Date };
 
-// --- constraint ontology --------------------------------------------------
-export type AvailabilityStatus =
-  | 'available'
-  | 'unavailable'
-  | 'preferred';
+// example usage:
+//   const slots: Slot[] = generateSlots(now, later, 30)
+//     .map(s => ({ ...s, activity: 'zoom' }));
+//   // later, fitness() will create contexts that include `activity` and any
+//   // other fields you added.  a preference rule may then read ctx.activity.
+//
+// the scheduler itself never inspects the metadata; it simply copies the
+// slot object verbatim into the context before running rules:
+//     const ctx = makeContext({ ...s, now: new Date() });
+// this makes adding new dimensions as easy as annotating slots before
+// passing them to `runGenetic`.
 
+// --- constraint ontology --------------------------------------------------
+// Availability no longer carries a status flag; rules express all
+// feasibility/preference information.  The legacy type previously defined
+// 'available' | 'unavailable' | 'preferred', but that behaviour has been
+// removed in favour of rule functions.
 // when a constraint is asked whether a slot is acceptable it receives an
 // EvaluationContext.  the context bundles not only the time interval being
 // evaluated, but any ancillary data that constraints or preferences might
@@ -103,8 +119,9 @@ export class CompositeConstraint implements Constraint {
   }
 }
 
+// legacy availability type retained only for backwards compatibility in
+// a few helpers; status is ignored and constraints are simply concatenated.
 export interface Availability {
-  status: AvailabilityStatus;
   constraints: Constraint[];
 }
 
@@ -117,6 +134,8 @@ export function evaluateAvailability(
   av: Availability,
   ctx: EvaluationContext
 ): boolean {
+  // simply delegate to the rule adapter; the adapter itself ignores any
+  // status information that may be present on the legacy object.
   return evaluateRule(availabilityToRule(av), ctx);
 }
 
@@ -124,16 +143,8 @@ export function intersectAvailability(
   a: Availability,
   b: Availability
 ): Availability {
-  const status:
-    | AvailabilityStatus
-    | 'unavailable' =
-    a.status === 'unavailable' || b.status === 'unavailable'
-      ? 'unavailable'
-      : a.status === 'preferred' || b.status === 'preferred'
-      ? 'preferred'
-      : 'available';
+  // status no longer exists; intersection simply concatenates constraints.
   return {
-    status: status as AvailabilityStatus,
     constraints: [...a.constraints, ...b.constraints],
   };
 }

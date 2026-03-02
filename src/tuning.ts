@@ -111,31 +111,19 @@ export const defaultFeatureExtractor: FeatureExtractor = problem => {
   const slotCount = problem.slots.length;
   const participantCount = problem.participant.length;
 
-  // count constraints by kind so the model can distinguish, for example, a lot
-  // of `NoticeConstraint` entries from a lot of `LocationConstraint` ones.
-  const constraintCounts: Record<string, number> = {};
+  // count rule-related characteristics instead of legacy constraint kinds.
+  let ruleCount = 0;
+  let slotDepCount = 0;
+  let nowDepCount = 0;
   for (const p of problem.participant) {
-    const list = p.availability?.constraints ?? [];
-    for (const c of list) {
-      constraintCounts[c.kind] = (constraintCounts[c.kind] || 0) + 1;
+    if (p.rules) {
+      ruleCount += p.rules.length;
+      for (const r of p.rules) {
+        if ((r as any).dependsOnSlot) slotDepCount++;
+        if ((r as any).dependsOnNow) nowDepCount++;
+      }
     }
   }
-  const timeConstraints = constraintCounts['time'] || 0;
-  const noticeConstraints = constraintCounts['notice'] || 0;
-  const activityConstraints = constraintCounts['activity'] || 0;
-  const locationConstraints = constraintCounts['location'] || 0;
-  const compositeConstraints = constraintCounts['composite'] || 0;
-  const otherConstraints = Object.entries(constraintCounts)
-    .filter(([k]) =>
-      ![
-        'time',
-        'notice',
-        'activity',
-        'location',
-        'composite',
-      ].includes(k)
-    )
-    .reduce((acc, [,v]) => acc + v, 0);
 
   const bookedCount = problem.participant.reduce(
     (acc, p) => acc + (p.bookedSlots?.length ?? 0),
@@ -154,15 +142,15 @@ export const defaultFeatureExtractor: FeatureExtractor = problem => {
     0
   );
 
+  // feature vector layout:
+  // [slots, participants, rules, slotDeps, nowDeps, booked, pref, hardAvail,
+  //  noticeReq]
   return [
     slotCount,
     participantCount,
-    timeConstraints,
-    noticeConstraints,
-    activityConstraints,
-    locationConstraints,
-    compositeConstraints,
-    otherConstraints,
+    ruleCount,
+    slotDepCount,
+    nowDepCount,
     bookedCount,
     prefCount,
     hardCount,

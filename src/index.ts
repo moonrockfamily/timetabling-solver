@@ -20,6 +20,7 @@ export * from './rules';
 export * from './scheduler';
 export * from './tuning';
 export * from './ics';
+export * from './constants';
 
 // There used to be an inlined "sample" script here, but it's been moved to a
 // standalone example file (e.g. `examples/sample.ts`) to keep the primary

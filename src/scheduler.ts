@@ -1,5 +1,29 @@
+/**
+ * Aggregator that computes the weighted mean of scores.
+ * @param weights - array of weights for each score
+ * @returns Aggregator function
+ */
+export function weightedMeanAggregator(weights: number[]): Aggregator {
+  return scores => {
+    if (scores.length === 0) return 0;
+    let total = 0, weightSum = 0;
+    for (let i = 0; i < scores.length; i++) {
+      const w = weights[i] ?? 1;
+      if (w === 0) continue;
+      total += scores[i] * w;
+      weightSum += w;
+    }
+    return weightSum ? total / weightSum : NaN;
+  };
+}
 import { RRuleSet } from 'rrule';
-import Genetic, { GenerationStats } from 'genetic-js-no-ww';
+import Genetic, {
+  GenerationStats,
+} from 'genetic-js-no-ww';
+
+// Generational statistics type is exported so tests and consumers can inspect
+// evolutionary progress without pulling in the entire library API.
+export type { GenerationStats };
 import {
   Constraint,
   Slot,
@@ -15,6 +39,35 @@ import {
 } from './rules';
 
 // --- utilities -----------------------------------------------------------
+/**
+ * Create a reusable notification handler for GA runs.
+ *
+ * @param label  short description printed alongside each line
+ * @param showPop  include population size in per-gen log (default false)
+ * @param showStartFinish  emit "started"/"finished" messages (default true)
+ * @returns Notification handler function for genetic algorithm runs
+ */
+export function makeNotifier(
+  label: string,
+  showPop = false,
+  showStartFinish = true
+): (pop: unknown[], gen: number, stats: any, finished: boolean) => void {
+  return (pop, gen, stats, finished) => {
+    if (showStartFinish && gen === 0) console.log(`  ${label} started`);
+    const maxVal = stats?.maximum?.toFixed(3) || 'n/a';
+    let msg = `  ${label} gen=${gen}`;
+    if (showPop) msg += `, pop=${JSON.stringify(pop)}`;
+    msg += `, maxFitness=${maxVal}`;
+    console.log(msg);
+
+    // warn if the very first generation contained a perfect individual
+    if (gen === 0 && stats && stats.maximum === 1) {
+      console.warn(`  >>> early termination: initial population already maxed`);
+    }
+
+    if (showStartFinish && finished) console.log(`  ${label} finished`);
+  };
+}
 export interface Participant {
   name: string;
   // legacy single-predicate availability; preserved for backwards
@@ -36,25 +89,53 @@ export interface Participant {
    * omitted the older combination of fields (`availability`, `rruleSet`,
    * `noticeRequired`, etc.) is used instead.  Individual rules may also
    * specify their own `preference` function.
+   *
+   * **Extensibility note:** rules receive an `EvaluationContext` that is
+   * constructed by copying the slot object verbatim (see the comment in
+   * `fitness()` below).  this means you can annotate slots with arbitrary
+   * extra properties (`room`, `provider`, `priceTier`, etc.) and then read
+   * them directly inside your rule or preference callback.  the scheduler
+   * itself never needs to know about these fields – it merely passes them
+   * through.
+   *
+   * Example:
+   * ```ts
+   * const slots: (Slot & { room?: string })[] = [
+   *   { start: d1, end: d2, room: 'A' },
+   *   { start: d2, end: d3, room: 'B' },
+   * ];
+   * const participant: Participant = {
+   *   name: 'Alice',
+   *   rules: [ctx => ctx.room === 'A' ? 1 : 0], // reads custom field
+   * };
+   * runGenetic(slots, [[participant]]);
+   * ```
    */
   rules?: AvailabilityRule[];
 
   rruleSet?: RRuleSet; // legacy recurrence set for "available when"
   noticeRequired?: number; // legacy milliseconds of advance notice
-  availability?: {
-    status: 'available' | 'unavailable' | 'preferred';
-    constraints: any[];
-  }; // high‑level status/constraints (legacy)
+  // the old `availability` object has been retired; use `rules` instead.
   bookedSlots?: Slot[]; // pre-existing meetings / reservations
   minGapMs?: number; // required gap before/after any booked slot
 }
 
+/**
+ * Single-meeting chromosome used by the genetic algorithm.  When we call
+ * `Genetic.create<Chromosome, { slots: Slot[]; participant: Participant[] }>()`
+ * this is the type of individual that is evolved.  the GA library itself
+ * treats the genome as an opaque object; all knowledge of `slotIndex` and
+ * `durationSlots` lives in our own `seed`, `mutate`, `crossover`, and
+ * `fitness` callbacks below.
+ */
 export interface Chromosome {
   slotIndex: number;
   durationSlots?: number; // if provided, spans multiple consecutive slots
 }
 
 // Multi-objective genome: each meeting chooses an index
+// the GA still views the chromosome as a generic payload; we merely
+// interpret `slotIndices` and `durationSlots` when computing fitness.
 export interface MultiChromosome {
   slotIndices: number[];
   durationSlots?: number[]; // parallel array if each meeting needs a duration
@@ -71,18 +152,13 @@ export interface MultiChromosome {
  * the participant had no legacy data at all.
  */
 function legacyRuleFromParticipant(p: Participant): AvailabilityRule | undefined {
-  if (!p.availability && !p.rruleSet && p.noticeRequired === undefined && !p.hardAvailability) {
+  if (!p.rruleSet && p.noticeRequired === undefined && !p.hardAvailability) {
     return undefined;
   }
 
   const rule: AvailabilityRule = ctx => {
     // enforce high‑level availability object
-    if (p.availability) {
-      if (p.availability.status === 'unavailable') return 0;
-      for (const c of p.availability.constraints) {
-        if (!c.satisfies(ctx)) return 0;
-      }
-    }
+    // legacy availability object is no longer supported; skip this step.
     // recurrence set
     if (p.rruleSet) {
       const hits = p.rruleSet.between(ctx.start, ctx.end, true);
@@ -119,11 +195,12 @@ function attachDeps(rule: AvailabilityRule): AvailabilityRule {
 function participantRules(p: Participant): AvailabilityRule[] {
   let rules: AvailabilityRule[] = [];
   if (p.rules && p.rules.length) {
-    rules = p.rules.map(r => attachDeps(r));
+    rules = [...p.rules];
   } else {
     const r = legacyRuleFromParticipant(p);
     if (r) rules = [r];
   }
+  // attachDeps once per rule rather than twice
   return rules.map(attachDeps);
 }
 
@@ -286,6 +363,12 @@ export function getFeasibilityDetail(
       }
     }
     // evaluate any availability rules (new API) or legacy fields
+    // create evaluation context; any fields carried on the slot (e.g.
+    // activity/location/room/customTags) are copied verbatim and therefore
+    // influence rule evaluation.  this is the other half of the
+    // extensibility story – you can tack arbitrary metadata onto slots and
+    // it will be available whenever the scheduler asks a rule about that
+    // slot.
     const ctx: EvaluationContext = {
       ...s,
       now: new Date(),
@@ -351,17 +434,14 @@ export function preferenceScore(ctx: EvaluationContext, participant: Participant
 
   if (scores.length === 0) {
     // no explicit preference at all; neutral baseline
-    scores.push(1);
+    scores.push(.5);
   }
 
   let result = Math.max(...scores);
 
-  // apply a small bump for participants explicitly marked as "preferred".  This
-  // mirrors earlier behaviour where status influenced preference as well as
-  // feasibility.  The bonus is clamped so the return value stays within [0,1].
-  if (participant.availability?.status === 'preferred') {
-    result = Math.min(1, result + 0.1);
-  }
+  // status field has been removed; preferences are now determined solely
+  // by rules and callbacks.
+  
   return result;
 }
 
@@ -415,6 +495,9 @@ function runSingleGeneticMulti(
   const n = participantGroups.length;
   const genetic = Genetic.create<MultiChromosome, { slots: Slot[]; participantGroups: Participant[][] }>();
   genetic.optimize = Genetic.Optimize.Maximize;
+  // use a simple tournament selection for both parents
+  genetic.select1 = Genetic.Select1.Tournament2;
+  genetic.select2 = Genetic.Select2.Tournament2;
 
   genetic.seed = (): MultiChromosome => {
     const base: MultiChromosome = { slotIndices: [] };
@@ -443,19 +526,22 @@ function runSingleGeneticMulti(
   genetic.crossover = (
     a: MultiChromosome,
     b: MultiChromosome
-  ): MultiChromosome => {
-    const child: MultiChromosome = { slotIndices: [] };
-    for (let i = 0; i < n; i++) {
-      child.slotIndices.push(Math.random() < 0.5 ? a.slotIndices[i] : b.slotIndices[i]);
-    }
-    return child;
+  ): MultiChromosome[] => {
+    const makeChild = (): MultiChromosome => {
+      const child: MultiChromosome = { slotIndices: [] };
+      for (let i = 0; i < n; i++) {
+        child.slotIndices.push(Math.random() < 0.5 ? a.slotIndices[i] : b.slotIndices[i]);
+      }
+      return child;
+    };
+    return [makeChild(), makeChild()];
   };
   genetic.fitness = (g: MultiChromosome): number => {
     const vec = fitnessMulti(g, slots, participantGroups);
     return scalariser(vec);
   };
   genetic.generation = (_pop: any, gen: number, stats: any): boolean =>
-    gen < (options.iterations ?? 500) && stats.max < 1;
+    gen < (options.iterations ?? 500) && stats.maximum < 1;
   genetic.notification = (_pop: any, gen: number, stats: any, finished: boolean): void => {
     if (options.notification) options.notification(_pop, gen, stats, finished);
   };
@@ -509,6 +595,8 @@ function collectMultiGeneticPopulation(
   const n = participantGroups.length;
   const genetic = Genetic.create<MultiChromosome, { slots: Slot[]; participantGroups: Participant[][] }>();
   genetic.optimize = Genetic.Optimize.Maximize;
+  genetic.select1 = Genetic.Select1.Tournament2;
+  genetic.select2 = Genetic.Select2.Tournament2;
 
   genetic.seed = (): MultiChromosome => {
     const base: MultiChromosome = { slotIndices: [] };
@@ -534,22 +622,26 @@ function collectMultiGeneticPopulation(
     }
     return copy;
   };
+  // crossover must return two offspring
   genetic.crossover = (
     a: MultiChromosome,
     b: MultiChromosome
-  ): MultiChromosome => {
-    const child: MultiChromosome = { slotIndices: [] };
-    for (let i = 0; i < n; i++) {
-      child.slotIndices.push(Math.random() < 0.5 ? a.slotIndices[i] : b.slotIndices[i]);
-    }
-    return child;
+  ): MultiChromosome[] => {
+    const makeChild = (): MultiChromosome => {
+      const child: MultiChromosome = { slotIndices: [] };
+      for (let i = 0; i < n; i++) {
+        child.slotIndices.push(Math.random() < 0.5 ? a.slotIndices[i] : b.slotIndices[i]);
+      }
+      return child;
+    };
+    return [makeChild(), makeChild()];
   };
   genetic.fitness = (g: MultiChromosome): number => {
     const vec = fitnessMulti(g, slots, participantGroups);
     return scalariser(vec);
   };
   genetic.generation = (_pop: any, gen: number, stats: any): boolean =>
-    gen < (options.iterations ?? 500) && stats.max < 1;
+    gen < (options.iterations ?? 500) && stats.maximum < 1;
   genetic.notification = (_pop: any, gen: number, stats: any, finished: boolean): void => {
     if (options.notification) options.notification(_pop, gen, stats, finished);
   };
@@ -697,9 +789,30 @@ export type Aggregator = (scores: number[]) => number;
  * @param scores - array of numeric scores
  * @returns aggregated value in [0,1]
  */
-export function defaultAggregator(scores: number[]): number {
-  if (scores.length === 0) return 1;
+
+/**
+ * Default aggregation strategy: mean of scores, or 1 if empty.
+ */
+export function meanAggregator(scores: number[]): number {
+  if (scores.length === 0) return 0;
+  const sum = scores.reduce((a, b) => a + b, 0);
+  return sum / scores.length;
+}
+
+/**
+ * Optional min aggregator: returns the minimum score, or 1 if empty.
+ */
+export function minAggregator(scores: number[]): number {
+  if (scores.length === 0) return 0;
   return Math.min(...scores);
+}
+
+/**
+ * Optional max aggregator: returns the maximum score, or 1 if empty.
+ */
+export function maxAggregator(scores: number[]): number {
+  if (scores.length === 0) return 0;
+  return Math.max(...scores);
 }
 
 /**
@@ -719,7 +832,7 @@ export function fitness(
   genome: Chromosome,
   slots: Slot[],
   participants: Participant[],
-  aggregator: Aggregator = defaultAggregator
+  aggregator: Aggregator = meanAggregator // now mean by default
 ): number {
   const range = slotRange(genome, slots);
   const prefs: number[] = [];
@@ -728,23 +841,61 @@ export function fitness(
       return 0;
     }
     const scores = range.map(s => {
+      // propagate any metadata fields carried on the slot into the
+      // evaluation context via object spread.  `activity`/`location` etc
+      // are copied automatically, and we append `now` separately for
+      // notice checks.
+      // build the evaluation context for this slot before asking
+      // preferences.  the `...s` spread is what makes the system
+      // extensible: any extra properties you have added to the slot
+      // (activity, location, room, priceTier, etc.) are copied verbatim
+      // into the context and therefore become visible to `rules` and
+      // `preference` callbacks.  the scheduler code itself never
+      // inspects or enumerates these fields – it simply hands them off.
+      // The `makeContext` wrapper used here also tracks which properties
+      // the rule actually reads (see `inferRuleDependencies`); it was
+      // recently fixed to retain all metadata fields rather than only the
+      // handful of known ones, which prevented custom tags from being
+      // visible inside tracked contexts.
       const ctx: TrackedEvaluationContext = makeContext({
-        start: s.start,
-        end: s.end,
-        activity: (s as any).activity,
-        location: (s as any).location,
+        ...s,
         now: new Date(),
       });
       const val = preferenceScore(ctx, p);
       // optional: cache dependency information from ctx.accessed here
       return val;
     });
+    // multiple slots: average the preference across them; this is a design choice and can be changed if desired
     prefs.push(scores.reduce((a,b)=>a+b,0)/scores.length);
   }
   const result = aggregator(prefs);
   return Math.max(0, Math.min(1, result));
 }
 
+/**
+ * Configuration passed through to the underlying genetic-js library.  The
+ * meaning matches the `options` object accepted by
+ * `genetic.evolve({ size, iterations }, context)`; we merely expose a
+ * simplified subset plus a couple of convenience fields used by our helpers.
+ *
+ * <ul>
+ * <li>`size` – population size.</li>
+ * <li>`iterations` – maximum number of generations before stopping.</li>
+ * <li>`restarts` – number of independent GA runs to perform (best result wins).</li>
+ * <li>`maxDurationSlots` – when non‑undefined, chromosomes may store a
+ *     `durationSlots` value; used to model meetings spanning several slots.</li>
+ * <li>`notification` – callback invoked on each generation (forwarded directly
+ *     from genetic-js notification parameter).</li>
+ * </ul>
+ *
+ * These fields overlap with the upstream `RunOptions` type exported by the
+ * `genetic-js-no-ww` library (also re-exported here as
+ * `GARunOptionsFromLib`).  For full details consult the declaration file
+ * `src/genetic-js-no-ww.d.ts` or the original project docs.
+ *
+ * Consumers familiar with `genetic-js-no-ww` can refer to its documentation
+ * for additional configuration details if they need to drop to a lower level.
+ */
 export interface GARunOptions {
   size?: number;
   iterations?: number;
@@ -818,8 +969,11 @@ function runSingleGenetic(
     }
     return copy;
   };
-  genetic.crossover = (a: Chromosome, b: Chromosome): Chromosome => {
-    return Math.random() < 0.5 ? a : b;
+  // crossover returns two offspring
+  genetic.crossover = (a: Chromosome, b: Chromosome): Chromosome[] => {
+    const c1 = Math.random() < 0.5 ? a : b;
+    const c2 = Math.random() < 0.5 ? a : b;
+    return [c1, c2];
   };
   genetic.fitness = (g: Chromosome): number => fitness(g, slots, participant, aggregator);
   genetic.generation = (
@@ -827,8 +981,7 @@ function runSingleGenetic(
     gen: number,
     stats: GenerationStats
   ): boolean => {
-    if (options.notification) options.notification(pop, gen, stats, false);
-    return gen < (options.iterations ?? 500) && stats.max < 1;
+    return gen < (options.iterations ?? 500) && stats.maximum < 1;
   };
   genetic.notification = (
     pop: Chromosome[],
@@ -906,8 +1059,11 @@ function collectSingleGeneticPopulation(
     }
     return copy;
   };
-  genetic.crossover = (a: Chromosome, b: Chromosome): Chromosome => {
-    return Math.random() < 0.5 ? a : b;
+  // ensure crossover returns a pair
+  genetic.crossover = (a: Chromosome, b: Chromosome): Chromosome[] => {
+    const c1 = Math.random() < 0.5 ? a : b;
+    const c2 = Math.random() < 0.5 ? a : b;
+    return [c1, c2];
   };
   genetic.fitness = (g: Chromosome): number => fitness(g, slots, participant, aggregator);
   genetic.generation = (
@@ -915,8 +1071,8 @@ function collectSingleGeneticPopulation(
     gen: number,
     stats: GenerationStats
   ): boolean => {
-    if (options.notification) options.notification(pop, gen, stats, false);
-    return gen < (options.iterations ?? 500) && stats.max < 1;
+    // notifications are already forwarded later
+    return gen < (options.iterations ?? 500) && stats.maximum < 1;
   };
   genetic.notification = (
     pop: Chromosome[],
@@ -946,7 +1102,7 @@ export function runGenetic(
   slots: Slot[],
   participant: Participant[],
   options: GARunOptions = {},
-  aggregator: Aggregator = defaultAggregator
+  aggregator: Aggregator = meanAggregator
 ): Chromosome | null {
   const feasible = filterFeasibleSlots(slots, participant);
   if (feasible.length === 0) return null;
@@ -959,6 +1115,9 @@ export function runGenetic(
     const candidate = runSingleGenetic(slots, participant, options, aggregator);
     if (!candidate) continue;
     const score = fitness(candidate, slots, participant, aggregator);
+    // ignore infeasible (zero) results so we don't accidentally return a
+    // blocked slot when a feasible one exists.
+    if (score === 0) continue;
     if (bestFitness === null || score > bestFitness) {
       bestFitness = score;
       bestResult = candidate;
@@ -987,7 +1146,7 @@ export function runGeneticTopN(
   participant: Participant[],
   n: number = 10,
   options: GARunOptions = {},
-  aggregator: Aggregator = defaultAggregator
+  aggregator: Aggregator = meanAggregator
 ): RankedChromosome[] {
   const feasible = filterFeasibleSlots(slots, participant);
   if (feasible.length === 0) return [];
@@ -1031,7 +1190,7 @@ export function runGeneticDiagnostics(
   slots: Slot[],
   participant: Participant[],
   options: GARunOptions = {},
-  aggregator: Aggregator = defaultAggregator
+  aggregator: Aggregator = meanAggregator
 ): { result: Chromosome | null; diagnostics: Diagnostic[] } {
   const diagnostics: Diagnostic[] = [];
 
@@ -1103,7 +1262,7 @@ export interface Meeting {
 export function runBatch(
   meetings: Meeting[],
   options: GARunOptions = {},
-  aggregator: Aggregator = defaultAggregator
+  aggregator: Aggregator = meanAggregator
 ): (Chromosome | null)[] {
   const results: (Chromosome | null)[] = [];
   for (const m of meetings) {

@@ -17,13 +17,15 @@ export interface TrackedEvaluationContext extends EvaluationContext {
  */
 export function makeContext(base: Partial<EvaluationContext> = {}): TrackedEvaluationContext {
   const accessed = new Set<string>();
-  const target: any = {
-    start: base.start || new Date(0),
-    end: base.end || new Date(0),
-    activity: base.activity,
-    location: base.location,
-    now: base.now,
-  };
+  // previously we only copied the handful of known fields; that meant any
+  // custom metadata (e.g. `room`, `priceTier`, etc.) was silently dropped
+  // and therefore invisible to rules when using a tracked context.  this
+  // broke our extensibility model.  copy `base` wholesale and then ensure
+  // `start`/`end` defaults exist so the proxy has sensible values.
+  const target: any = { ...base };
+  if (target.start === undefined) target.start = new Date(0);
+  if (target.end === undefined) target.end = new Date(0);
+
   const proxy = new Proxy(target, {
     get(obj, prop, receiver) {
       accessed.add(String(prop));
@@ -138,11 +140,12 @@ export function evaluateRule(rule: AvailabilityRule | undefined, ctx: Evaluation
 
 export function availabilityToRule(av: Availability): AvailabilityRule {
   const fn: AvailabilityRule = ctx => {
-    if (av.status === 'unavailable') return 0;
+    // ignore any legacy status flags; availability is driven solely by
+    // constraint satisfaction.
     for (const c of av.constraints) {
       if (!c.satisfies(ctx)) return 0;
     }
-    return av.status === 'preferred' ? 1 : 1;
+    return 1;
   };
   fn.dependsOnSlot = av.constraints.length === 0;
   fn.dependsOnNow = false;

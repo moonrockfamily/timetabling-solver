@@ -8,6 +8,7 @@
     "clean": "rimraf dist",
     "start": "node examples/sample.js || node -r ts-node/register examples/sample.ts",
     "dev": "ts-node examples/sample.ts",
+    "debug": "node --inspect-brk -r ts-node/register examples/sample.ts",
     "test": "mocha -r ts-node/register test/**/*.spec.ts",
     "lint": "eslint --ext .ts src test",
     "prepare": "npm run build",
@@ -20,17 +21,19 @@
     "rrule": "^2.7.1"
   },
   "devDependencies": {
+    "date-fns": "^4.1.0",
+    "date-fns-fp": "^4.1.0",
     "@types/chai": "^4.3.4",
     "@types/mocha": "^10.0.10",
     "@types/node": "^18.16.18",
-    "@typescript-eslint/eslint-plugin": "^6.21.0",
-    "@typescript-eslint/parser": "^6.21.0",
+    "@typescript-eslint/eslint-plugin": "^8.56.0",
+    "@typescript-eslint/parser": "^8.56.0",
     "chai": "^4.3.7",
-    "eslint": "^8.57.1",
-    "mocha": "^11.2.0",
+    "eslint": "^10.0.2",
+    "mocha": "^12.0.0-beta-3",
     "rimraf": "^5.0.0",
-    "ts-node": "^10.9.1",
-    "typescript": "^4.9.5"
+    "ts-node": "^10.9.2",
+    "typescript": "^5.1.6"
   },
   "files": [
     "dist/**/*"
@@ -50,8 +53,5 @@
     "availability",
     "rrule"
   ],
-  "overrides": {
-    "minimatch": "10.2.1"
-  },
   "license": "MIT"
 }
